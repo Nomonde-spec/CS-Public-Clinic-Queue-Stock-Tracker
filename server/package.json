@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "node --env-file=.env --watch index.js",
     "build": "npm install --prefix ../client && npm run build --prefix ../client",
-    "start": "npm run start --prefix ../client",
+    "start": "node index.js",
     "postinstall": "npm run build",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
