@@ -4,10 +4,16 @@ const { Pool } = require("pg");
 const port = Number(process.env.PORT) || 3000;
 const pool = new Pool({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } });
 const getAvailability = (stockCount) => stockCount === 0 ? "Out of Stock" : stockCount >= 250 ? "In Stock" : "Low Stock";
+const allowedOrigins = (process.env.CLIENT_ORIGINS || process.env.CLIENT_ORIGIN || "http://localhost:3000")
+	.split(",")
+	.map((origin) => origin.trim())
+	.filter(Boolean);
 
 const send = (response, status, body) => {
 	response.writeHead(status, {
-		"Access-Control-Allow-Origin": process.env.CLIENT_ORIGIN || "http://localhost:3000",
+		"Access-Control-Allow-Origin": response.req.headers.origin && allowedOrigins.includes(response.req.headers.origin)
+			? response.req.headers.origin
+			: allowedOrigins[0],
 		"Access-Control-Allow-Headers": "Content-Type",
 		"Access-Control-Allow-Methods": "GET,POST,PATCH,DELETE,OPTIONS",
 		"Content-Type": "application/json",
