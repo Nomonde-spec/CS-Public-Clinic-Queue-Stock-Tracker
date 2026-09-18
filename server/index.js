@@ -1,9 +1,9 @@
 const http = require("node:http");
 const { Pool } = require("pg");
+const { getAvailability, parseStockCount, isAllowedClinicStatus } = require("./validation");
 
 const port = Number(process.env.PORT) || 3000;
 const pool = new Pool({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } });
-const getAvailability = (stockCount) => stockCount === 0 ? "Out of Stock" : stockCount >= 250 ? "In Stock" : "Low Stock";
 const allowedOrigins = (process.env.CLIENT_ORIGINS || process.env.CLIENT_ORIGIN || "http://localhost:3000")
 	.split(",")
 	.map((origin) => origin.trim())
@@ -195,8 +195,11 @@ async function handleRequest(request, response) {
 			const body = await readBody(request);
 			const name = String(body.name || "").trim();
 			const category = String(body.category || "").trim();
-			const stockCount = Number(body.stockCount);
-			if (!name || !category || !Number.isInteger(stockCount) || stockCount < 0) return send(response, 400, { error: "Name, category, and a non-negative whole stock quantity are required." });
+			const parsedStock = parseStockCount(body.stockCount);
+			if (!name || !category || !parsedStock.ok) {
+				return send(response, 400, { error: parsedStock.ok ? "Name and category are required." : parsedStock.message });
+			}
+			const stockCount = parsedStock.value;
 			const availability = getAvailability(stockCount);
 			const clinics = String(body.clinics || "All clinics").trim() || "All clinics";
 			try {
@@ -216,9 +219,18 @@ async function handleRequest(request, response) {
 		const clinicUpdateMatch = request.url.match(/^\/api\/clinics\/([^/]+)$/);
 		if (clinicUpdateMatch && request.method === "PATCH") {
 			const body = await readBody(request);
+			const nextStatus = body.status ?? "Open";
+			if (!isAllowedClinicStatus(nextStatus)) {
+				return send(response, 400, { error: "Invalid clinic status." });
+			}
+			const nextPatients = Number(body.patients);
+			const nextWait = Number(body.wait);
+			if (!Number.isInteger(nextPatients) || nextPatients < 0 || !Number.isInteger(nextWait) || nextWait < 0) {
+				return send(response, 400, { error: "Queue values must be non-negative whole numbers." });
+			}
 			const result = await pool.query(
 				"UPDATE clinics SET patients = $1, wait = $2, status = $3, updated_at = NOW() WHERE name = $4 RETURNING name, district, address, hours, phone, wait, patients, stock, status, updated_at AS \"updatedAt\"",
-				[Number(body.patients), Number(body.wait), ["Closed", "Open - Low Wait", "Open - Moderate Wait", "Open - Busy", "Open - Very Busy", "Busy", "Very Busy"].includes(body.status) ? body.status : "Open", decodeURIComponent(clinicUpdateMatch[1])],
+				[nextPatients, nextWait, nextStatus, decodeURIComponent(clinicUpdateMatch[1])],
 			);
 			return result.rows[0] ? send(response, 200, result.rows[0]) : send(response, 404, { error: "Clinic not found." });
 		}
@@ -226,9 +238,14 @@ async function handleRequest(request, response) {
 		const medicationUpdateMatch = request.url.match(/^\/api\/medications\/([^/]+)$/);
 		if (medicationUpdateMatch && request.method === "PATCH") {
 			const body = await readBody(request);
+			const parsedStock = parseStockCount(body.stockCount);
+			if (!parsedStock.ok) {
+				return send(response, 400, { error: parsedStock.message });
+			}
+			const stockCount = parsedStock.value;
 			const result = await pool.query(
 				"UPDATE medications SET availability = $1, clinics = $2, stock_count = $3 WHERE name = $4 RETURNING name, category, availability, clinics, stock_count AS \"stockCount\"",
-				[getAvailability(Math.max(0, Number(body.stockCount) || 0)), body.clinics, Math.max(0, Number(body.stockCount) || 0), decodeURIComponent(medicationUpdateMatch[1])],
+				[getAvailability(stockCount), String(body.clinics || "All clinics").trim() || "All clinics", stockCount, decodeURIComponent(medicationUpdateMatch[1])],
 			);
 			return result.rows[0] ? send(response, 200, result.rows[0]) : send(response, 404, { error: "Medication not found." });
 		}
@@ -253,11 +270,14 @@ async function handleRequest(request, response) {
 			const body = await readBody(request);
 			const clinic = await pool.query("SELECT id FROM clinics WHERE name = $1", [body.clinic]);
 			if (!body.name || !body.email || !clinic.rows[0]) return send(response, 400, { error: "Name, email, and a valid clinic are required." });
+			const email = String(body.email).trim().toLowerCase();
+			const duplicate = await pool.query("SELECT 1 FROM staff WHERE email = $1", [email]);
+			if (duplicate.rows[0]) return send(response, 409, { error: "A staff account with this email already exists." });
 			const result = await pool.query(
 				`INSERT INTO staff (name, email, password_hash, role, clinic_id, status)
 				 VALUES ($1, $2, $3, 'staff', $4, $5)
 				 RETURNING id`,
-				[body.name, body.email.toLowerCase(), "managed-by-portal", clinic.rows[0].id, body.status || "pending"],
+				[body.name, email, "managed-by-portal", clinic.rows[0].id, body.status || "pending"],
 			);
 			const staff = await pool.query(`${staffQuery} WHERE s.id = $1`, [result.rows[0].id]);
 			return send(response, 201, staff.rows[0]);
