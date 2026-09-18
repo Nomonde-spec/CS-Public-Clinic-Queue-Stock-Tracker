@@ -3,11 +3,177 @@ const { Pool } = require("pg");
 const { getAvailability, parseStockCount, isAllowedClinicStatus } = require("./validation");
 
 const port = Number(process.env.PORT) || 3000;
-const pool = new Pool({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } });
+const defaultClinics = [
+	{ id: 1, name: "Metro Family Care Centre", province: "Gauteng", district: "Central District", address: "220 Plaza Avenue", hours: "08:00 - 17:00", phone: "011 555 0101", wait: 12, patients: 4, stock: 98, status: "Open", updatedAt: new Date().toISOString() },
+	{ id: 2, name: "Northside Public Health Clinic", province: "KwaZulu-Natal", district: "Sector 12", address: "12 Northside Road", hours: "08:00 - 17:00", phone: "011 555 0102", wait: 35, patients: 14, stock: 84, status: "Open", updatedAt: new Date().toISOString() },
+	{ id: 3, name: "Eastside Community Dispensary", province: "Eastern Cape", district: "East Area", address: "45 East Market Street", hours: "08:00 - 17:00", phone: "011 555 0103", wait: 55, patients: 25, stock: 90, status: "Open", updatedAt: new Date().toISOString() },
+	{ id: 4, name: "Lakeside Community Clinic", province: "Western Cape", district: "Lakeside District", address: "8 Lakeside Drive", hours: "08:00 - 17:00", phone: "011 555 0104", wait: null, patients: 0, stock: 55, status: "Closed", updatedAt: new Date().toISOString() },
+	{ id: 5, name: "Oakridge Triage & Care Node", province: "Free State", district: "Oakridge", address: "3 Oakridge Way", hours: "08:00 - 17:00", phone: "011 555 0105", wait: 8, patients: 2, stock: 95, status: "Open", updatedAt: new Date().toISOString() },
+	{ id: 6, name: "Mopani Community Health Centre", province: "Limpopo", district: "Mopani District", address: "18 Baobab Road", hours: "08:00 - 17:00", phone: "015 555 0106", wait: 18, patients: 7, stock: 89, status: "Open", updatedAt: new Date().toISOString() },
+	{ id: 7, name: "Highveld Public Clinic", province: "Mpumalanga", district: "Highveld", address: "64 Panorama Street", hours: "08:00 - 17:00", phone: "013 555 0107", wait: 42, patients: 18, stock: 76, status: "Open", updatedAt: new Date().toISOString() },
+	{ id: 8, name: "Karoo Wellness Clinic", province: "Northern Cape", district: "Karoo District", address: "7 Kalahari Avenue", hours: "08:00 - 17:00", phone: "053 555 0108", wait: 27, patients: 11, stock: 81, status: "Open", updatedAt: new Date().toISOString() },
+	{ id: 9, name: "Mthatha Public Health Node", province: "North West", district: "Mafikeng District", address: "31 Heritage Road", hours: "08:00 - 17:00", phone: "018 555 0109", wait: 65, patients: 31, stock: 68, status: "Open", updatedAt: new Date().toISOString() },
+];
+const defaultMedications = [
+	{ id: 1, name: "Amoxicillin 500mg Capsules", category: "Antibiotic", availability: "Low Stock", clinics: "50 units in stock", stockCount: 50 },
+	{ id: 2, name: "Albuterol 90mcg Inhaler", category: "Respiratory", availability: "In Stock", clinics: "250 units in stock", stockCount: 250 },
+	{ id: 3, name: "Metformin 850mg Tablets", category: "Antidiabetic", availability: "In Stock", clinics: "250 units in stock", stockCount: 250 },
+	{ id: 4, name: "Paracetamol 500mg Tablets", category: "Pain & Fever", availability: "In Stock", clinics: "250 units in stock", stockCount: 250 },
+	{ id: 5, name: "Atorvastatin 20mg Tablets", category: "Cardiovascular", availability: "Out of Stock", clinics: "0 units in stock", stockCount: 0 },
+	{ id: 6, name: "Lisinopril 10mg Tablets", category: "Cardiovascular", availability: "Low Stock", clinics: "50 units in stock", stockCount: 50 },
+];
+
 const allowedOrigins = (process.env.CLIENT_ORIGINS || process.env.CLIENT_ORIGIN || "http://localhost:3000")
 	.split(",")
 	.map((origin) => origin.trim())
 	.filter(Boolean);
+
+function createMemoryDb() {
+	const clinics = defaultClinics.map((clinic) => ({ ...clinic }));
+	const medications = defaultMedications.map((medication) => ({ ...medication }));
+	const staff = [
+		{ id: "admin-seed", name: "System Administrator", email: "sys.admin@carequeue.gov", role: "admin", status: "approved", clinic: "All clinics", clinic_id: null, password_hash: "managed-by-portal" },
+		{ id: "staff-seed", name: "Dr. Sarah Jenkins", email: "s.jenkins@metrocare.gov", role: "staff", status: "approved", clinic: "Metro Family Care Centre", clinic_id: 1, password_hash: "managed-by-portal" },
+	];
+
+	const cleanStatus = (status) => status || "Open";
+	const rowForClinic = (clinic) => ({
+		id: clinic.id,
+		name: clinic.name,
+		province: clinic.province,
+		district: clinic.district,
+		address: clinic.address,
+		hours: clinic.hours,
+		phone: clinic.phone,
+		wait: clinic.wait,
+		patients: clinic.patients,
+		stock: clinic.stock,
+		status: clinic.status,
+		updated_at: clinic.updatedAt || new Date().toISOString(),
+		"updatedAt": clinic.updatedAt || new Date().toISOString(),
+	});
+	const rowForMedication = (medication) => ({
+		id: medication.id,
+		name: medication.name,
+		category: medication.category,
+		availability: medication.availability,
+		clinics: medication.clinics,
+		stock_count: medication.stockCount,
+		"stockCount": medication.stockCount,
+	});
+	const rowForStaff = (member) => ({
+		id: member.id,
+		name: member.name,
+		email: member.email,
+		role: member.role,
+		status: member.status,
+		clinic: member.clinic || "All clinics",
+	});
+
+	return {
+		async query(sql, params) {
+			const args = Array.isArray(params) ? params : [];
+			const text = String(sql).trim();
+			if (text.startsWith("CREATE EXTENSION") || text.startsWith("CREATE TABLE") || text.startsWith("ALTER TABLE") || text.startsWith("DO $$")) return { rows: [], rowCount: 0 };
+			if (text.startsWith("SELECT s.id, s.name, s.email, s.role, s.status")) {
+				const query = staff.map(rowForStaff);
+				if (text.includes("WHERE s.email = $1")) {
+					const email = params[0]?.toLowerCase();
+					return { rows: query.filter((member) => member.email === email) };
+				}
+				return { rows: query };
+			}
+			if (text.startsWith("SELECT COUNT(*)::int AS total FROM clinics")) return { rows: [{ total: clinics.length }] };
+			if (text.startsWith("SELECT COUNT(*)::int AS total FROM staff WHERE role = 'staff' AND status = 'approved'")) return { rows: [{ total: staff.filter((member) => member.role === "staff" && member.status === "approved").length }] };
+			if (text.startsWith("SELECT COUNT(*)::int AS total FROM staff WHERE role = 'staff' AND status = 'pending'")) return { rows: [{ total: staff.filter((member) => member.role === "staff" && member.status === "pending").length }] };
+			if (text.includes("SELECT name, province, district, address, hours, phone, wait, patients, stock, status, updated_at AS \"updatedAt\" FROM clinics")) {
+				return { rows: clinics.map(rowForClinic) };
+			}
+			if (text.includes("SELECT name, category, availability, clinics, stock_count AS \"stockCount\" FROM medications")) {
+				return { rows: medications.map(rowForMedication) };
+			}
+			if (text.startsWith("INSERT INTO clinics")) {
+				const [name, province, district, address, hours, phone] = args;
+				const clinic = { id: clinics.length + 1, name, province, district, address, hours, phone, wait: null, patients: 0, stock: 0, status: "Open", updatedAt: new Date().toISOString() };
+				clinics.push(clinic);
+				return { rows: [rowForClinic(clinic)] };
+			}
+			if (text.startsWith("UPDATE clinics SET")) {
+				const name = args[3];
+				const clinic = clinics.find((item) => item.name === name);
+				if (!clinic) return { rows: [] };
+				clinic.patients = Number(args[0]);
+				clinic.wait = Number(args[1]);
+				clinic.status = cleanStatus(args[2]);
+				clinic.updatedAt = new Date().toISOString();
+				return { rows: [rowForClinic(clinic)] };
+			}
+			if (text.startsWith("SELECT id FROM clinics WHERE name = $1")) {
+				const clinic = clinics.find((item) => item.name === args[0]);
+				return { rows: clinic ? [{ id: clinic.id }] : [] };
+			}
+			if (text.startsWith("INSERT INTO medications")) {
+				const [name, category, availability, clinicsValue, stockCount] = args;
+				const item = { id: medications.length + 1, name, category, availability, clinics: clinicsValue, stockCount: Number(stockCount) };
+				medications.push(item);
+				return { rows: [rowForMedication(item)] };
+			}
+			if (text.startsWith("UPDATE medications SET")) {
+				const availability = args[0];
+				const clinicsValue = args[1];
+				const stockCount = Number(args[2]);
+				const name = args[3];
+				const item = medications.find((medication) => medication.name === name);
+				if (!item) return { rows: [] };
+				item.availability = availability;
+				item.clinics = clinicsValue;
+				item.stockCount = stockCount;
+				return { rows: [rowForMedication(item)] };
+			}
+			if (text.startsWith("SELECT 1 FROM staff WHERE email = $1")) {
+				const email = String(args[0]).toLowerCase();
+				return { rows: staff.filter((member) => member.email.toLowerCase() === email).map(() => ({ 1: true })) };
+			}
+			if (text.startsWith("INSERT INTO staff")) {
+				const [name, email, passwordHash, role, clinicId, status] = args;
+				const member = { id: `memory-${Date.now()}-${staff.length + 1}`, name, email: String(email).toLowerCase(), role, status: status || "pending", clinic: clinicId ? clinics.find((clinic) => clinic.id === clinicId)?.name ?? "All clinics" : "All clinics", clinic_id: clinicId ?? null, password_hash: passwordHash };
+				staff.push(member);
+				return { rows: [rowForStaff(member)] };
+			}
+			if (text.startsWith("UPDATE staff SET")) {
+				const fields = text.slice(text.indexOf("SET") + 3, text.indexOf("WHERE"));
+				const member = staff.find((item) => item.id === args[args.length - 1]);
+				if (!member) return { rows: [] };
+				if (fields.includes("name =")) member.name = args[0];
+				if (fields.includes("email =")) member.email = String(args[0]).toLowerCase();
+				if (fields.includes("status =")) member.status = args[0];
+				if (fields.includes("clinic_id =")) {
+					const clinicId = args[0];
+					member.clinic_id = clinicId;
+					member.clinic = clinics.find((clinic) => clinic.id === clinicId)?.name ?? "All clinics";
+				}
+				return { rows: [rowForStaff(member)] };
+			}
+			if (text.startsWith("DELETE FROM staff WHERE id = $1")) {
+				const id = args[0];
+				const index = staff.findIndex((member) => member.id === id);
+				if (index >= 0) staff.splice(index, 1);
+				return { rows: [], rowCount: 1 };
+			}
+			if (text.startsWith("SELECT 1 FROM staff WHERE email = $1 AND role = 'staff' AND status = 'approved'")) {
+				const email = String(args[0]).toLowerCase();
+				const result = staff.find((member) => member.role === "staff" && member.status === "approved" && member.email.toLowerCase() === email);
+				return { rows: result ? [{ 1: 1 }] : [] };
+			}
+			if (text.includes("SELECT name, category, availability, clinics, stock_count AS \"stockCount\" FROM medications ORDER BY id")) {
+				return { rows: medications.map(rowForMedication) };
+			}
+			return { rows: [], rowCount: 0 };
+		}
+	};
+}
+
+const pool = process.env.DATABASE_URL ? new Pool({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } }) : createMemoryDb();
 
 const send = (response, status, body) => {
 	response.writeHead(status, {
@@ -35,6 +201,7 @@ const staffQuery = `
 `;
 
 async function ensureDatabase() {
+	if (!process.env.DATABASE_URL) return;
 	await pool.query(`CREATE EXTENSION IF NOT EXISTS pgcrypto`);
 	await pool.query(`
 		CREATE TABLE IF NOT EXISTS clinics (
@@ -95,18 +262,6 @@ async function ensureDatabase() {
 		)
 	`);
 
-	const defaultClinics = [
-		{ name: "Metro Family Care Centre", province: "Gauteng", district: "Central District", address: "220 Plaza Avenue", hours: "08:00 - 17:00", phone: "011 555 0101" },
-		{ name: "Northside Public Health Clinic", province: "KwaZulu-Natal", district: "Sector 12", address: "12 Northside Road", hours: "08:00 - 17:00", phone: "011 555 0102" },
-		{ name: "Eastside Community Dispensary", province: "Eastern Cape", district: "East Area", address: "45 East Market Street", hours: "08:00 - 17:00", phone: "011 555 0103" },
-		{ name: "Lakeside Community Clinic", province: "Western Cape", district: "Lakeside District", address: "8 Lakeside Drive", hours: "08:00 - 17:00", phone: "011 555 0104" },
-		{ name: "Oakridge Triage & Care Node", province: "Free State", district: "Oakridge", address: "3 Oakridge Way", hours: "08:00 - 17:00", phone: "011 555 0105" },
-		{ name: "Mopani Community Health Centre", province: "Limpopo", district: "Mopani District", address: "18 Baobab Road", hours: "08:00 - 17:00", phone: "015 555 0106" },
-		{ name: "Highveld Public Clinic", province: "Mpumalanga", district: "Highveld", address: "64 Panorama Street", hours: "08:00 - 17:00", phone: "013 555 0107" },
-		{ name: "Karoo Wellness Clinic", province: "Northern Cape", district: "Karoo District", address: "7 Kalahari Avenue", hours: "08:00 - 17:00", phone: "053 555 0108" },
-		{ name: "Mthatha Public Health Node", province: "North West", district: "Mafikeng District", address: "31 Heritage Road", hours: "08:00 - 17:00", phone: "018 555 0109" },
-	];
-
 	for (const clinic of defaultClinics) {
 		await pool.query(
 			`INSERT INTO clinics (name, province, district, address, hours, phone)
@@ -137,18 +292,10 @@ async function ensureDatabase() {
 		);
 	}
 
-	const defaultMedications = [
-		["Amoxicillin 500mg Capsules", "Antibiotic", "Low Stock", "50 units in stock", 50],
-		["Albuterol 90mcg Inhaler", "Respiratory", "In Stock", "250 units in stock", 250],
-		["Metformin 850mg Tablets", "Antidiabetic", "In Stock", "250 units in stock", 250],
-		["Paracetamol 500mg Tablets", "Pain & Fever", "In Stock", "250 units in stock", 250],
-		["Atorvastatin 20mg Tablets", "Cardiovascular", "Out of Stock", "0 units in stock", 0],
-		["Lisinopril 10mg Tablets", "Cardiovascular", "Low Stock", "50 units in stock", 50],
-	];
 	for (const medication of defaultMedications) {
 		await pool.query(
 			`INSERT INTO medications (name, category, availability, clinics, stock_count) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (name) DO NOTHING`,
-			medication,
+			[medication.name, medication.category, medication.availability, medication.clinics, medication.stockCount],
 		);
 	}
 	await pool.query(`UPDATE medications SET stock_count = CASE WHEN name IN ('Amoxicillin 500mg Capsules', 'Lisinopril 10mg Tablets') THEN 50 WHEN name IN ('Albuterol 90mcg Inhaler', 'Metformin 850mg Tablets', 'Paracetamol 500mg Tablets') THEN 250 ELSE stock_count END WHERE stock_count = 0`);
