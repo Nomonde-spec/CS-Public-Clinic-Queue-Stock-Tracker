@@ -15,10 +15,11 @@ type Clinic = {
   wait: number | null;
   patients: number;
   stock: number;
-  status: "Open" | "Closed" | "Open - Low Wait" | "Open - Moderate Wait" | "Open - Busy" | "Open - Very Busy" | "Busy" | "Very Busy";
+  status: "Open" | "Closed" | "Open - Low Wait" | "Open - Moderate Wait" | "Open - Long Wait" | "Open - Longer Wait" | "Open - Busy" | "Open - Very Busy" | "Busy" | "Very Busy";
   distance: number;
   updatedAt?: string;
 };
+type QueueTicket = { id: string; clinicName: string; queueNumber: number; status: "waiting" | "called" | "served" | "missed" | "left"; scheduledAt: string; calledAt: string | null; callExpiresAt: string | null; position: number | null; peopleAhead?: number; estimatedWait: number; patients: number; wait: number };
 
 type Medication = {
   name: string;
@@ -38,7 +39,7 @@ type StaffRegistration = {
 
 type StaffUpdate = Pick<StaffRegistration, "name" | "email" | "clinic">;
 type SystemSummary = { activeClinics: number; totalStaff: number; pendingApprovals: number };
-type ClinicControlUpdate = Pick<Clinic, "patients" | "wait" | "status">;
+type ClinicControlUpdate = Pick<Clinic, "status">;
 type MedicationControlUpdate = Pick<Medication, "availability" | "clinics" | "stockCount">;
 
 const initialApprovedStaff: StaffRegistration[] = [
@@ -100,11 +101,18 @@ function StatusPill({ value }: { value: string }) {
   return <span className={`pill ${value.toLowerCase().replaceAll(" ", "-")}`}>{value}</span>;
 }
 
-  function getQueueLabel(clinic: Clinic): "Closed" | "Open - Low Wait" | "Open - Moderate Wait" | "Open - Busy" | "Open - Very Busy" {
+  function getQueueLabel(clinic: Clinic): "Closed" | "Open - Low Wait" | "Open - Moderate Wait" | "Open - Long Wait" | "Open - Longer Wait" {
   if (clinic.status === "Closed") return "Closed";
-  if (clinic.status === "Open - Low Wait" || clinic.status === "Open - Moderate Wait" || clinic.status === "Open - Busy" || clinic.status === "Busy") return "Open - Busy";
-  if (clinic.status === "Open - Very Busy" || clinic.status === "Very Busy") return "Open - Very Busy";
+  if (clinic.status === "Open - Long Wait" || clinic.status === "Open - Busy" || clinic.status === "Busy") return "Open - Long Wait";
+  if (clinic.status === "Open - Longer Wait" || clinic.status === "Open - Very Busy" || clinic.status === "Very Busy") return "Open - Longer Wait";
   return clinic.wait !== null && clinic.wait < 20 ? "Open - Low Wait" : "Open - Moderate Wait";
+}
+
+function getWaitPerPatient(status: Clinic["status"]) {
+  if (status === "Open - Low Wait") return 3;
+  if (status === "Open - Long Wait" || status === "Open - Busy" || status === "Busy") return 10;
+  if (status === "Open - Longer Wait" || status === "Open - Very Busy" || status === "Very Busy") return 15;
+  return 5;
 }
 
 function formatUpdatedAt(updatedAt?: string) {
@@ -148,8 +156,80 @@ function ClinicDetailsLegacy({ clinic, onBack }: { clinic: Clinic; onBack: () =>
   return <main className="public-main page-main"><button className="back-button" onClick={onBack}>Back to clinic directory</button><div className="detail-grid"><section><div className="detail-card"><StatusPill value={clinic.status} /><span>Last updated: 4 minutes ago</span><h1>{clinic.name}</h1><p>Primary community triage and medication dispensing location.</p><hr /><p>Address: {clinic.address}</p><p>Hours: {clinic.hours}</p><p>Phone: {clinic.phone}</p></div><div className="detail-card chart-card"><h2>Today&apos;s queue activity</h2><p>Historical average wait times compared with the current status.</p><div className="bars"><i style={{ height: "34%" }} /><i style={{ height: "60%" }} /><i style={{ height: "85%" }} /><i className="current" style={{ height: "28%" }} /><i style={{ height: "50%" }} /></div><div className="chart-labels"><span>9 AM</span><span>11 AM</span><span>1 PM</span><span>3 PM</span><span>5 PM</span></div></div></section><section className="detail-card inventory-card"><div className="section-heading"><div><h2>Pharmacy inventory</h2><p>Medication availability currently reported by this clinic.</p></div><span className="live"><span className="dot" /> Updated 10 minutes ago</span></div><MedicationTable /></section></div></main>;
 }
 
+function PatientQueue({ clinic }: { clinic: Clinic }) {
+  const storageKey = `carequeue-ticket:${clinic.name}`;
+  const [ticket, setTicket] = useState<QueueTicket | null>(null);
+  const [token, setToken] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [message, setMessage] = useState("");
+  const [clock, setClock] = useState(() => Date.now());
+  const loadTicket = async (ticketId: string, accessToken: string) => {
+    const response = await fetch(`${apiUrl}/api/queue-tickets/${ticketId}?token=${encodeURIComponent(accessToken)}`);
+    if (!response.ok) throw new Error("This queue ticket is no longer available.");
+    setTicket(await response.json() as QueueTicket);
+  };
+  useEffect(() => {
+    const saved = window.localStorage.getItem(storageKey);
+    if (!saved) return;
+    const timer = window.setTimeout(() => {
+      try {
+        const parsed = JSON.parse(saved) as { id: string; token: string };
+        loadTicket(parsed.id, parsed.token).then(() => setToken(parsed.token)).catch(() => window.localStorage.removeItem(storageKey));
+      } catch {
+        window.localStorage.removeItem(storageKey);
+      }
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [storageKey]);
+  useEffect(() => {
+    if (!ticket || !token || ["served", "missed", "left"].includes(ticket.status)) return;
+    const timer = window.setInterval(() => loadTicket(ticket.id, token).catch(() => undefined), 10000);
+    return () => window.clearInterval(timer);
+  }, [ticket, token]);
+  useEffect(() => {
+    const timer = window.setInterval(() => setClock(Date.now()), 10000);
+    return () => window.clearInterval(timer);
+  }, []);
+  const joinQueue = async () => {
+    setLoading(true);
+    setMessage("");
+    try {
+      const response = await fetch(`${apiUrl}/api/clinics/${encodeURIComponent(clinic.name)}/queue-tickets`, { method: "POST" });
+      const result = await response.json() as { ticket?: QueueTicket; capability?: string; error?: string };
+      if (!response.ok || !result.ticket || !result.capability) throw new Error(result.error || "Could not join the queue.");
+      setTicket(result.ticket);
+      setToken(result.capability);
+      window.localStorage.setItem(storageKey, JSON.stringify({ id: result.ticket.id, token: result.capability }));
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Could not join the queue.");
+    } finally {
+      setLoading(false);
+    }
+  };
+  const leaveQueue = async () => {
+    if (!ticket || !token) return;
+    setLoading(true);
+    try {
+      const response = await fetch(`${apiUrl}/api/queue-tickets/${ticket.id}/leave`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ token }) });
+      const result = await response.json() as QueueTicket & { error?: string };
+      if (!response.ok) throw new Error(result.error || "Could not leave the queue.");
+      setTicket(result);
+      window.localStorage.removeItem(storageKey);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Could not leave the queue.");
+    } finally {
+      setLoading(false);
+    }
+  };
+  const peopleAhead = ticket ? ticket.peopleAhead ?? Math.max((ticket.position ?? 1) - 1, 0) : 0;
+  const displayedQueueNumber = ticket?.status === "waiting" ? peopleAhead + 1 : ticket?.queueNumber;
+  const displayedScheduledAt = ticket?.status === "waiting" ? new Date(clock + peopleAhead * 5 * 60000).toISOString() : ticket?.scheduledAt;
+  const statusText = ticket?.status === "called" ? "Please proceed to the clinic desk now." : ticket?.status === "served" ? "Your visit is complete." : ticket?.status === "missed" ? "This number was missed. Request a new number to join again." : ticket?.status === "left" ? "You left this queue." : "Your number is active.";
+  return <section className="detail-card queue-checkin-card"><div className="section-heading"><div><p className="eyebrow">PATIENT CHECK-IN</p><h2>Request a queue number</h2><p>Each clinic has its own live queue. Your allocated time updates from the people ahead of you.</p></div>{ticket && <StatusPill value={ticket.status === "waiting" ? "Waiting" : ticket.status} />}</div>{ticket ? <><div className="ticket-number">#{displayedQueueNumber}<small>{ticket.status === "left" ? "YOUR ISSUED QUEUE NUMBER" : "YOUR QUEUE NUMBER"}</small></div><div className="queue-ticket-details"><span><strong>{peopleAhead}</strong> people ahead</span><span><strong>{ticket.estimatedWait}</strong> min estimated wait</span><span><strong>{displayedScheduledAt ? new Date(displayedScheduledAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "-"}</strong> allocated time</span></div><p className="queue-message">{statusText}</p>{ticket.status === "waiting" && <button className="secondary-button" disabled={loading} onClick={leaveQueue}>{loading ? "Updating..." : "Leave queue"}</button>}{["missed", "served", "left"].includes(ticket.status) && <button className="primary-button" disabled={loading || clinic.status === "Closed"} onClick={() => { setTicket(null); setToken(""); setMessage(""); }}>{clinic.status === "Closed" ? "Clinic closed" : "Request a new number"}</button>}</> : <><div className="queue-ticket-details"><span><strong>{clinic.patients}</strong> patients ahead</span><span><strong>{clinic.patients * getWaitPerPatient(clinic.status)}</strong> min estimated wait</span><span><strong>{clinic.status === "Closed" ? "Closed" : "Next available"}</strong> service</span></div><p>See how many patients are ahead before requesting your queue number.</p><button className="primary-button" disabled={loading || clinic.status === "Closed"} onClick={joinQueue}>{loading ? "Requesting..." : clinic.status === "Closed" ? "Clinic currently closed" : "Get my queue number"}</button>{message && <p className="queue-error">{message}</p>}</>}</section>;
+}
+
 function ClinicDetails({ clinic, onBack }: { clinic: Clinic; onBack: () => void }) {
-  return <main className="public-main page-main"><button className="back-button" onClick={onBack}>Back to clinic directory</button><div className="detail-grid"><section><div className="detail-card"><StatusPill value={getQueueLabel(clinic)} /><span>{formatUpdatedAt(clinic.updatedAt)}</span><h1>{clinic.name}</h1><p>Primary community triage and medication dispensing location.</p><hr /><p>Address: {clinic.address}</p><p>Hours: {clinic.hours}</p><p>Phone: {clinic.phone}</p></div><div className="detail-card chart-card"><h2>Today&apos;s queue activity</h2><p>Historical average wait times compared with the current status.</p><div className="bars"><i style={{ height: "34%" }} /><i style={{ height: "60%" }} /><i style={{ height: "85%" }} /><i className="current" style={{ height: "28%" }} /><i style={{ height: "50%" }} /></div><div className="chart-labels"><span>9 AM</span><span>11 AM</span><span>1 PM</span><span>3 PM</span><span>5 PM</span></div></div></section><section className="detail-card inventory-card"><div className="section-heading"><div><h2>Pharmacy inventory</h2><p>Medication availability currently reported by this clinic.</p></div><span className="live"><span className="dot" /> {formatUpdatedAt(clinic.updatedAt)}</span></div><MedicationTable /></section></div></main>;
+  return <main className="public-main page-main"><button className="back-button" onClick={onBack}>Back to clinic directory</button><div className="detail-grid"><section><div className="detail-card"><StatusPill value={getQueueLabel(clinic)} /><span>{formatUpdatedAt(clinic.updatedAt)}</span><h1>{clinic.name}</h1><p>Primary community triage and medication dispensing location.</p><hr /><p>Address: {clinic.address}</p><p>Hours: {clinic.hours}</p><p>Phone: {clinic.phone}</p></div><PatientQueue clinic={clinic} /><div className="detail-card chart-card"><h2>Today&apos;s queue activity</h2><p>Historical average wait times compared with the current status.</p><div className="bars"><i style={{ height: "34%" }} /><i style={{ height: "60%" }} /><i style={{ height: "85%" }} /><i className="current" style={{ height: "28%" }} /><i style={{ height: "50%" }} /></div><div className="chart-labels"><span>9 AM</span><span>11 AM</span><span>1 PM</span><span>3 PM</span><span>5 PM</span></div></div></section><section className="detail-card inventory-card"><div className="section-heading"><div><h2>Pharmacy inventory</h2><p>Medication availability currently reported by this clinic.</p></div><span className="live"><span className="dot" /> {formatUpdatedAt(clinic.updatedAt)}</span></div><MedicationTable /></section></div></main>;
 }
 
 function Auth({ onLogin, onRegister, onPublic, message }: { onLogin: (role: Role, email: string, password: string, token: string) => void; onRegister: (registration: Omit<StaffRegistration, "id">) => void; onPublic: () => void; message: string }) {
@@ -201,9 +281,10 @@ function StaffOperationsPanel({ clinicData, enrolledClinic, onUpdateClinic }: { 
     window.setTimeout(() => setSavedMessage(""), 2500);
   };
   const commit = async () => {
-    await onUpdateClinic(clinic.name, { patients, wait, status });
+    await onUpdateClinic(clinic.name, { status });
     showSaved("Updates published to the public dashboard");
   };
+  return <main className="queue-dashboard"><div className="queue-dashboard-title"><div><p className="eyebrow">QUEUE MANAGEMENT</p><h1>{clinic.name} queue</h1><p>Patient count and estimated wait are calculated automatically from live check-ins.</p></div><span>Current Live Metrics: <strong>{clinic.wait ?? 0}m Wait / {clinic.patients} Patients in Queue</strong></span></div><div className="queue-columns"><section className="queue-card"><h2>Live queue metrics</h2><div className="queue-ticket-details"><span><strong>{clinic.patients}</strong> patients waiting</span><span><strong>{clinic.wait ?? 0}</strong> min estimated wait</span><span><strong>Automatic</strong> progression</span></div><p className="queue-message">Patients receive queue numbers and allocated service times from the public clinic page. Leaving, serving, or missing a ticket updates these metrics automatically.</p><hr /><label className="queue-label">Clinic status level</label><div className="status-options"><button className={status === "Open - Low Wait" ? "selected" : ""} onClick={() => setStatus("Open - Low Wait")}>OPEN - LOW WAIT</button><button className={status === "Open - Moderate Wait" ? "selected" : ""} onClick={() => setStatus("Open - Moderate Wait")}>OPEN - MODERATE WAIT</button><button className={status === "Open - Long Wait" ? "selected long-wait" : ""} onClick={() => setStatus("Open - Long Wait")}>OPEN - LONG WAIT</button><button className={status === "Open - Longer Wait" ? "selected longer-wait" : ""} onClick={() => setStatus("Open - Longer Wait")}>OPEN - LONGER WAIT</button><button className={status === "Closed" ? "selected closed" : ""} onClick={() => setStatus("Closed")}>CLOSED</button></div><div className="queue-commit"><span>{savedMessage || "Status changes affect whether patients can check in."}</span><button className="primary-button" onClick={commit}>Publish status</button></div></section></div></main>;
     return <main className="queue-dashboard"><div className="queue-dashboard-title"><div><p className="eyebrow">QUEUE MANAGEMENT</p><h1>Queue Velocity Controller</h1><p>{clinic.name} - Update parameters displayed on the live public dashboard.</p></div><span>Current Live Metrics: <strong>{clinic.wait ?? 0}m Wait / {clinic.patients} Patients in Queue</strong></span></div><div className="queue-columns"><section className="queue-card"><h2>Adjust Active Queue Metrics</h2><label className="queue-label">Clinic status level (public display badge)</label><div className="status-options"><button className={status === "Open - Low Wait" ? "selected" : ""} onClick={() => setStatus("Open - Low Wait")}>● &nbsp; OPEN - LOW WAIT</button><button className={status === "Open - Moderate Wait" ? "selected" : ""} onClick={() => setStatus("Open - Moderate Wait")}>○ &nbsp; OPEN - MODERATE WAIT</button><button className={status === "Open - Busy" ? "selected" : ""} onClick={() => setStatus("Open - Busy")}>○ &nbsp; OPEN - BUSY</button><button className={status === "Open - Very Busy" ? "selected" : ""} onClick={() => setStatus("Open - Very Busy")}>○ &nbsp; OPEN - VERY BUSY</button><button className={status === "Closed" ? "selected closed" : ""} onClick={() => setStatus("Closed")}>○ &nbsp; CLOSED</button></div><hr /><div className="queue-label-row"><label className="queue-label">Patients currently checked-in (physical queue size)</label><span>Typically ranges 0 - 50</span></div><div className="stepper"><button onClick={() => setPatients((value) => Math.max(0, value - 1))}>-</button><strong>{patients}</strong><button onClick={() => setPatients((value) => value + 1)}>+</button><span>Patients undergoing triage or waiting for basic dispensary services.</span></div><hr /><div className="queue-label-row"><label className="queue-label">Estimated waiting time (minutes)</label><span>Updates dynamically based on arrival rate</span></div><input className="wait-slider" type="range" min="0" max="120" value={wait} onChange={(event) => setWait(Number(event.target.value))} /><div className="slider-labels"><span>0m (Direct Admission)</span><b>Active: {wait} mins</b><span>120m+ (Extremely Busy)</span></div><hr /><div className="queue-commit"><span>{savedMessage || "Changes publish to the public CareQueue site within 30 seconds."}</span><button className="primary-button" onClick={commit}>✓ &nbsp; Commit &amp; Publish Updates</button></div></section><section className="queue-card queue-log"><h2>Queue Parameter Log</h2><p>Historical log of updates pushed to {clinic.name}</p><hr /><div className="log-entry current"><b>Queue wait set to {clinic.wait ?? 0} minutes</b><small>Today - Current live status</small></div><div className="log-entry"><b>Active queue currently contains {clinic.patients} patients</b><small>Public dashboard synchronized</small></div><div className="log-entry"><b>Clinic status level: {status}</b><small>Ready for publication</small></div><div className="log-entry"><b>Facility initialized for morning triage</b><small>Staff desk checkout</small></div></section></div></main>;
 }
 
@@ -306,6 +387,7 @@ export default function Home() {
       clinics = data.clinics.map((clinic) => ({ ...clinic, distance: clinics.find((current) => current.name === clinic.name)?.distance ?? 0 }));
       medications = data.medications;
       setClinicData(clinics);
+      setSelectedClinic((current) => current ? clinics.find((clinic) => clinic.name === current.name) ?? current : null);
       setMedicationData(medications);
     }).catch(() => undefined);
     const loadStaff = () => fetch(`${apiUrl}/api/staff`).then((response) => response.ok ? response.json() : Promise.reject()).then((records: ApiStaff[]) => {
