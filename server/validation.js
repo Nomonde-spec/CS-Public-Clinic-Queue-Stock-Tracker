@@ -17,7 +17,7 @@ function parseStockCount(value) {
 }
 
 function isAllowedClinicStatus(value) {
-  const allowed = ["Open", "Closed", "Open - Low Wait", "Open - Moderate Wait", "Open - Busy", "Open - Very Busy", "Busy", "Very Busy"];
+  const allowed = ["Open", "Closed", "Open - Low Wait", "Open - Moderate Wait", "Open - Long Wait", "Open - Longer Wait", "Open - Busy", "Open - Very Busy", "Busy", "Very Busy"];
   return allowed.includes(value);
 }
 
