@@ -1,7 +1,7 @@
 const http = require("node:http");
 const { Pool } = require("pg");
 const { getAvailability, parseStockCount, isAllowedClinicStatus } = require("./validation");
-const { allocateTicket, callTicket, deriveQueue, expireTickets, publicTicket, queueDate } = require("./queue");
+const { allocateTicket, callTicket, deriveQueue, expireTickets, markMedicationCollected, publicTicket, queueDate } = require("./queue");
 
 const port = Number(process.env.PORT) || 3000;
 const defaultClinics = [
@@ -192,6 +192,9 @@ const ticketFromRow = (row, clinicName) => ({
 	callExpiresAt: row.call_expires_at ? new Date(row.call_expires_at).toISOString() : null,
 	capabilityHash: row.capability_hash,
 	createdAt: row.created_at ? new Date(row.created_at).toISOString() : new Date().toISOString(),
+	requestedMedication: row.requested_medication || row.requestedMedication || null,
+	medicationCollected: Boolean(row.medication_collected ?? row.medicationCollected),
+	collectedAt: row.collected_at ? new Date(row.collected_at).toISOString() : null,
 });
 
 async function expireQueueTickets(clinicName) {
@@ -228,13 +231,21 @@ const tickets = await getQueueTickets(clinicResult.rows[0].id, clinicName, queue
 	return { clinic: clinicResult.rows[0], tickets, summary: deriveQueue(tickets, new Date(), clinicResult.rows[0].status) };
 }
 
-async function createQueueTicket(clinicName) {
+async function createQueueTicket(clinicName, medicationName = null) {
+	const requestedMedication = medicationName ? String(medicationName).trim() : null;
+	if (requestedMedication) {
+		const medicationResult = await pool.query("SELECT name, stock_count AS \"stockCount\" FROM medications WHERE name = $1", [requestedMedication]);
+		if (!medicationResult.rows[0]) return { error: "Medication not found.", status: 404 };
+		if (Number(medicationResult.rows[0].stockCount) <= 0) return { error: "This medication is currently out of stock.", status: 409 };
+	}
 	if (!process.env.DATABASE_URL) {
 		const clinic = (await pool.query("SELECT id, name, status FROM clinics WHERE name = $1", [clinicName])).rows[0];
 		if (!clinic) return { error: "Clinic not found.", status: 404 };
 		if (clinic.status === "Closed") return { error: "This clinic is currently closed.", status: 409 };
 		expireTickets(memoryQueueTickets);
 		const ticket = allocateTicket(memoryQueueTickets, clinicName, new Date(), clinic.status);
+		ticket.requestedMedication = requestedMedication;
+		ticket.medicationCollected = false;
 		memoryQueueTickets.push(ticket);
 		return { ticket: publicTicket(ticket, memoryQueueTickets, new Date(), clinic.status), capability: ticket.raw };
 	}
@@ -254,16 +265,18 @@ async function createQueueTicket(clinicName) {
 		}
 		await client.query("UPDATE queue_tickets SET status = 'missed' WHERE status = 'called' AND call_expires_at <= NOW()");
 		const result = await client.query(
-			`SELECT id, queue_date::text AS queue_date, queue_number, issued_queue_number, status, scheduled_at, called_at, call_expires_at, capability_hash, created_at
+			`SELECT id, queue_date::text AS queue_date, queue_number, issued_queue_number, status, scheduled_at, called_at, call_expires_at, capability_hash, created_at, requested_medication, medication_collected, collected_at
 			 FROM queue_tickets WHERE clinic_id = $1 AND queue_date = CURRENT_DATE ORDER BY queue_number FOR UPDATE`,
 			[clinic.id],
 		);
 		const existing = result.rows.map((row) => ticketFromRow(row, clinicName));
 		const ticket = allocateTicket(existing, clinicName, new Date(), clinic.status);
+		ticket.requestedMedication = requestedMedication;
+		ticket.medicationCollected = false;
 		await client.query(
-			`INSERT INTO queue_tickets (id, clinic_id, queue_date, queue_number, issued_queue_number, status, scheduled_at, capability_hash, created_at)
-			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-			[ticket.id, clinic.id, ticket.queueDate, ticket.queueNumber, ticket.issuedQueueNumber, ticket.status, ticket.scheduledAt, ticket.capabilityHash, ticket.createdAt],
+			`INSERT INTO queue_tickets (id, clinic_id, queue_date, queue_number, issued_queue_number, status, scheduled_at, capability_hash, created_at, requested_medication, medication_collected)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+			[ticket.id, clinic.id, ticket.queueDate, ticket.queueNumber, ticket.issuedQueueNumber, ticket.status, ticket.scheduledAt, ticket.capabilityHash, ticket.createdAt, ticket.requestedMedication, ticket.medicationCollected],
 		);
 		await client.query("COMMIT");
 		return { ticket: publicTicket(ticket, [...existing, ticket], new Date(), clinic.status), capability: ticket.raw };
@@ -390,11 +403,17 @@ async function ensureDatabase() {
 			call_expires_at TIMESTAMP WITH TIME ZONE,
 			capability_hash CHAR(64) NOT NULL,
 			created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+			requested_medication VARCHAR(255),
+			medication_collected BOOLEAN NOT NULL DEFAULT FALSE,
+			collected_at TIMESTAMP WITH TIME ZONE,
 			UNIQUE (clinic_id, queue_date, queue_number)
 		)
 	`);
 	await pool.query("CREATE INDEX IF NOT EXISTS queue_tickets_clinic_status_idx ON queue_tickets (clinic_id, queue_date, status)");
 	await pool.query("ALTER TABLE queue_tickets ADD COLUMN IF NOT EXISTS issued_queue_number INTEGER");
+	await pool.query("ALTER TABLE queue_tickets ADD COLUMN IF NOT EXISTS requested_medication VARCHAR(255)");
+	await pool.query("ALTER TABLE queue_tickets ADD COLUMN IF NOT EXISTS medication_collected BOOLEAN NOT NULL DEFAULT FALSE");
+	await pool.query("ALTER TABLE queue_tickets ADD COLUMN IF NOT EXISTS collected_at TIMESTAMP WITH TIME ZONE");
 	await pool.query("UPDATE queue_tickets SET issued_queue_number = queue_number WHERE issued_queue_number IS NULL");
 	await pool.query(`
 		WITH ranked_waiting AS (
@@ -489,8 +508,16 @@ async function handleRequest(request, response) {
 		}
 
 		const queueCreateMatch = request.url.match(/^\/api\/clinics\/([^/]+)\/queue-tickets$/);
+		if (queueCreateMatch && request.method === "GET") {
+			const clinicName = decodeURIComponent(queueCreateMatch[1]);
+			const clinicResult = await pool.query("SELECT id, status FROM clinics WHERE name = $1", [clinicName]);
+			if (!clinicResult.rows[0]) return send(response, 404, { error: "Clinic not found." });
+			const tickets = await getQueueTickets(clinicResult.rows[0].id, clinicName, queueDate(), clinicResult.rows[0].status);
+			return send(response, 200, { clinicName, tickets: tickets.map((ticket) => publicTicket(ticket, tickets, new Date(), clinicResult.rows[0].status)) });
+		}
 		if (queueCreateMatch && request.method === "POST") {
-			const result = await createQueueTicket(decodeURIComponent(queueCreateMatch[1]));
+			const body = await readBody(request);
+			const result = await createQueueTicket(decodeURIComponent(queueCreateMatch[1]), body?.medication || null);
 			return result.ticket ? send(response, 201, result) : send(response, result.status, { error: result.error });
 		}
 
@@ -514,16 +541,29 @@ async function handleRequest(request, response) {
 			} else if (action === "complete") {
 				if (result.ticket.status !== "called") return send(response, 409, { error: "Only called tickets can be completed." });
 				result.ticket.status = "served";
+				if (result.ticket.requestedMedication) {
+					const medicationList = (await pool.query("SELECT name, stock_count AS \"stockCount\" FROM medications WHERE name = $1", [result.ticket.requestedMedication])).rows;
+					if (process.env.DATABASE_URL) {
+						const medication = medicationList[0];
+						if (medication && Number(medication.stockCount) > 0) {
+							const nextStock = Math.max(0, Number(medication.stockCount) - 1);
+							await pool.query("UPDATE medications SET stock_count = $1, availability = $2 WHERE name = $3", [nextStock, nextStock === 0 ? "Out of Stock" : nextStock >= 250 ? "In Stock" : "Low Stock", result.ticket.requestedMedication]);
+							result.ticket.medicationCollected = true;
+							result.ticket.collectedAt = new Date().toISOString();
+						}
+					}
+				}
 			} else if (action === "miss") {
 				if (!["waiting", "called"].includes(result.ticket.status)) return send(response, 409, { error: "This ticket cannot be marked missed." });
 				result.ticket.status = "missed";
 			}
 			if (!process.env.DATABASE_URL) {
+				if (result.ticket.requestedMedication && action === "complete") markMedicationCollected(result.ticket, (await pool.query("SELECT name, stock_count AS \"stockCount\" FROM medications WHERE name = $1", [result.ticket.requestedMedication])).rows);
 				return send(response, 200, publicTicket(result.ticket, memoryQueueTickets));
 			}
 			await pool.query(
-				`UPDATE queue_tickets SET status = $1, called_at = $2, call_expires_at = $3 WHERE id = $4`,
-				[result.ticket.status, result.ticket.calledAt, result.ticket.callExpiresAt, result.ticket.id],
+				`UPDATE queue_tickets SET status = $1, called_at = $2, call_expires_at = $3, medication_collected = $4, collected_at = $5 WHERE id = $6`,
+				[result.ticket.status, result.ticket.calledAt, result.ticket.callExpiresAt, Boolean(result.ticket.medicationCollected), result.ticket.collectedAt, result.ticket.id],
 			);
 				const refreshedTickets = await getQueueTickets(null, result.ticket.clinicName, result.ticket.queueDate);
 				return send(response, 200, publicTicket(result.ticket, refreshedTickets));

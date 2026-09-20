@@ -55,7 +55,18 @@ function allocateTicket(tickets, clinicName, now = new Date(), clinicStatus = "O
 	const queue = deriveQueue(today, current, clinicStatus);
 	const lastScheduled = today.filter((ticket) => ["waiting", "called"].includes(ticket.status)).map((ticket) => new Date(ticket.scheduledAt).getTime()).reduce((latest, value) => Math.max(latest, value), current.getTime() - slotMinutes * 60000);
 	const capability = createCapability();
-	return { id: crypto.randomUUID(), clinicName, clinicStatus, queueDate: date, queueNumber: queue.nextQueueNumber, issuedQueueNumber: queue.waiting.length + 1, status: "waiting", scheduledAt: addMinutes(new Date(lastScheduled), slotMinutes).toISOString(), calledAt: null, callExpiresAt: null, capabilityHash: capability.hash, createdAt: current.toISOString(), ...capability };
+	return { id: crypto.randomUUID(), clinicName, clinicStatus, queueDate: date, queueNumber: queue.nextQueueNumber, issuedQueueNumber: queue.waiting.length + 1, status: "waiting", scheduledAt: addMinutes(new Date(lastScheduled), slotMinutes).toISOString(), calledAt: null, callExpiresAt: null, capabilityHash: capability.hash, createdAt: current.toISOString(), requestedMedication: null, medicationCollected: false, collectedAt: null, ...capability };
+}
+
+function markMedicationCollected(ticket, medicationList, now = new Date()) {
+	if (!ticket || !ticket.requestedMedication || ticket.medicationCollected) return false;
+	const found = medicationList.find((item) => item.name === ticket.requestedMedication);
+	if (!found || Number(found.stockCount) <= 0) return false;
+	found.stockCount = Math.max(0, Number(found.stockCount) - 1);
+	found.availability = found.stockCount === 0 ? "Out of Stock" : found.stockCount >= 250 ? "In Stock" : "Low Stock";
+	ticket.medicationCollected = true;
+	ticket.collectedAt = new Date(now).toISOString();
+	return true;
 }
 
 function publicTicket(ticket, tickets, now = new Date(), clinicStatus = ticket.clinicStatus || "Open") {
@@ -66,7 +77,7 @@ function publicTicket(ticket, tickets, now = new Date(), clinicStatus = ticket.c
 	const displayQueueNumber = position > 0 ? position : ticket.issuedQueueNumber || ticket.queueNumber;
 	const peopleAhead = position > 0 ? position - 1 : 0;
 	const displayScheduledAt = position > 0 ? addMinutes(new Date(now), peopleAhead * slotMinutes).toISOString() : ticket.scheduledAt;
-	return { id: ticket.id, clinicName: ticket.clinicName, queueNumber: displayQueueNumber, status: ticket.status, scheduledAt: displayScheduledAt, calledAt: ticket.calledAt, callExpiresAt: ticket.callExpiresAt, position: position > 0 ? position : null, peopleAhead, estimatedWait: position > 0 ? peopleAhead * slotMinutes : 0, patients: queue.patients, wait: queue.wait };
+	return { id: ticket.id, clinicName: ticket.clinicName, queueNumber: displayQueueNumber, status: ticket.status, scheduledAt: displayScheduledAt, calledAt: ticket.calledAt, callExpiresAt: ticket.callExpiresAt, position: position > 0 ? position : null, peopleAhead, estimatedWait: position > 0 ? peopleAhead * slotMinutes : 0, patients: queue.patients, wait: queue.wait, requestedMedication: ticket.requestedMedication || null, medicationCollected: Boolean(ticket.medicationCollected), collectedAt: ticket.collectedAt || null };
 }
 
 function callTicket(ticket, now = new Date()) {
@@ -83,4 +94,4 @@ function expireTickets(tickets, now = new Date()) {
 	for (const ticket of tickets) if (ticket.status === "called" && ticket.callExpiresAt && new Date(ticket.callExpiresAt).getTime() <= current) ticket.status = "missed";
 }
 
-module.exports = { CALL_WINDOW_MINUTES, QUEUE_SLOT_MINUTES, STATUS_SLOT_MINUTES, addMinutes, allocateTicket, callTicket, createCapability, deriveQueue, expireTickets, getQueueSlotMinutes, getQueueStatus, publicTicket, queueDate };
+module.exports = { CALL_WINDOW_MINUTES, QUEUE_SLOT_MINUTES, STATUS_SLOT_MINUTES, addMinutes, allocateTicket, callTicket, createCapability, deriveQueue, expireTickets, getQueueSlotMinutes, getQueueStatus, markMedicationCollected, publicTicket, queueDate };
