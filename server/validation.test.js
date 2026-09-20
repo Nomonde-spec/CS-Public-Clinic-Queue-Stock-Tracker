@@ -1,7 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { getAvailability, parseStockCount, isAllowedClinicStatus } = require('./validation');
-const { allocateTicket, callTicket, deriveQueue, expireTickets, getQueueSlotMinutes, getQueueStatus, publicTicket } = require('./queue');
+const { allocateTicket, callTicket, deriveQueue, expireTickets, getQueueSlotMinutes, getQueueStatus, markMedicationCollected, publicTicket } = require('./queue');
 
 test('stock thresholds match the contract', () => {
   assert.equal(getAvailability(0), 'Out of Stock');
@@ -82,6 +82,20 @@ test('queue status is derived from waiting patient count', () => {
   assert.equal(getQueueStatus(100), 'Open - Long Wait');
   assert.equal(getQueueStatus(149), 'Open - Long Wait');
   assert.equal(getQueueStatus(150), 'Open - Longer Wait');
+});
+
+test('medication collection state is tracked and zero stock reads as out of stock', () => {
+  const now = new Date('2026-09-19T08:00:00.000Z');
+  const ticket = allocateTicket([], 'Clinic A', now);
+  ticket.requestedMedication = 'Paracetamol 500mg Tablets';
+  const medicationList = [{ name: 'Paracetamol 500mg Tablets', stockCount: 1, availability: 'Low Stock' }];
+
+  assert.equal(markMedicationCollected(ticket, medicationList, now), true);
+  assert.equal(ticket.medicationCollected, true);
+  assert.equal(medicationList[0].stockCount, 0);
+  assert.equal(medicationList[0].availability, 'Out of Stock');
+  assert.equal(publicTicket(ticket, [ticket]).requestedMedication, 'Paracetamol 500mg Tablets');
+  assert.equal(publicTicket(ticket, [ticket]).medicationCollected, true);
 });
 
 test('called tickets expire and cannot be called twice', () => {
