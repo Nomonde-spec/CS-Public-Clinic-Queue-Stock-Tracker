@@ -1,7 +1,7 @@
 const http = require("node:http");
 const { Pool } = require("pg");
 const { getAvailability, parseStockCount, isAllowedClinicStatus } = require("./validation");
-const { allocateTicket, callTicket, deriveQueue, expireTickets, markMedicationCollected, publicTicket, queueDate } = require("./queue");
+const { allocateTicket, callTicket, canServeTicket, deriveQueue, expireTickets, markMedicationCollected, normalizeRequestedMedications, publicTicket, queueDate } = require("./queue");
 
 const port = Number(process.env.PORT) || 3000;
 const defaultClinics = [
@@ -62,6 +62,8 @@ function createMemoryDb() {
 		clinics: medication.clinics,
 		stock_count: medication.stockCount,
 		"stockCount": medication.stockCount,
+		updated_at: medication.updatedAt || new Date().toISOString(),
+		"updatedAt": medication.updatedAt || new Date().toISOString(),
 	});
 	const rowForStaff = (member) => ({
 		id: member.id,
@@ -91,7 +93,7 @@ function createMemoryDb() {
 			if (text.includes("SELECT name, province, district, address, hours, phone, wait, patients, stock, status, updated_at AS \"updatedAt\" FROM clinics")) {
 				return { rows: clinics.map(rowForClinic) };
 			}
-			if (text.includes("SELECT name, category, availability, clinics, stock_count AS \"stockCount\" FROM medications")) {
+			if (text.includes("SELECT name, category, availability, clinics, stock_count AS \"stockCount\"")) {
 				return { rows: medications.map(rowForMedication) };
 			}
 			if (text.startsWith("INSERT INTO clinics")) {
@@ -132,6 +134,7 @@ function createMemoryDb() {
 				item.availability = availability;
 				item.clinics = clinicsValue;
 				item.stockCount = stockCount;
+				item.updatedAt = new Date().toISOString();
 				return { rows: [rowForMedication(item)] };
 			}
 			if (text.startsWith("SELECT 1 FROM staff WHERE email = $1")) {
@@ -169,7 +172,7 @@ function createMemoryDb() {
 				const result = staff.find((member) => member.role === "staff" && member.status === "approved" && member.email.toLowerCase() === email);
 				return { rows: result ? [{ 1: 1 }] : [] };
 			}
-			if (text.includes("SELECT name, category, availability, clinics, stock_count AS \"stockCount\" FROM medications ORDER BY id")) {
+			if (text.includes("SELECT name, category, availability, clinics, stock_count AS \"stockCount\"") && text.includes("ORDER BY id")) {
 				return { rows: medications.map(rowForMedication) };
 			}
 			return { rows: [], rowCount: 0 };
@@ -192,9 +195,13 @@ const ticketFromRow = (row, clinicName) => ({
 	callExpiresAt: row.call_expires_at ? new Date(row.call_expires_at).toISOString() : null,
 	capabilityHash: row.capability_hash,
 	createdAt: row.created_at ? new Date(row.created_at).toISOString() : new Date().toISOString(),
-	requestedMedication: row.requested_medication || row.requestedMedication || null,
+	requestedMedications: normalizeRequestedMedications(row.requested_medication || row.requestedMedication),
+	requestedMedication: normalizeRequestedMedications(row.requested_medication || row.requestedMedication)[0] || null,
 	medicationCollected: Boolean(row.medication_collected ?? row.medicationCollected),
 	collectedAt: row.collected_at ? new Date(row.collected_at).toISOString() : null,
+	servedAt: row.served_at ? new Date(row.served_at).toISOString() : null,
+	cancelledAt: row.cancelled_at ? new Date(row.cancelled_at).toISOString() : null,
+	missedAt: row.missed_at ? new Date(row.missed_at).toISOString() : null,
 });
 
 async function expireQueueTickets(clinicName) {
@@ -202,7 +209,7 @@ async function expireQueueTickets(clinicName) {
 		expireTickets(memoryQueueTickets);
 		return;
 	}
-	await pool.query("UPDATE queue_tickets SET status = 'missed' WHERE status = 'called' AND call_expires_at <= NOW()");
+	await pool.query("UPDATE queue_tickets SET status = 'missed', missed_at = NOW() WHERE status IN ('ready', 'called') AND call_expires_at <= NOW()");
 }
 
 async function getQueueTickets(clinicId, clinicName, date = queueDate(), clinicStatus = "Open") {
@@ -211,12 +218,12 @@ async function getQueueTickets(clinicId, clinicName, date = queueDate(), clinicS
 	}
 	const result = clinicId === null
 		? await pool.query(
-			`SELECT q.id, q.queue_date::text AS queue_date, q.queue_number, q.issued_queue_number, q.status, q.scheduled_at, q.called_at, q.call_expires_at, q.capability_hash, q.created_at, c.status AS clinic_status
+			`SELECT q.id, q.queue_date::text AS queue_date, q.queue_number, q.issued_queue_number, q.status, q.scheduled_at, q.called_at, q.call_expires_at, q.capability_hash, q.created_at, q.requested_medication, q.medication_collected, q.collected_at, q.served_at, q.cancelled_at, q.missed_at, c.status AS clinic_status
 			 FROM queue_tickets q JOIN clinics c ON c.id = q.clinic_id WHERE c.name = $1 AND q.queue_date = $2 ORDER BY q.queue_number`,
 			[clinicName, date],
 		)
 		: await pool.query(
-			`SELECT id, queue_date::text AS queue_date, queue_number, issued_queue_number, status, scheduled_at, called_at, call_expires_at, capability_hash, created_at, $3 AS clinic_status
+			`SELECT id, queue_date::text AS queue_date, queue_number, issued_queue_number, status, scheduled_at, called_at, call_expires_at, capability_hash, created_at, requested_medication, medication_collected, collected_at, served_at, cancelled_at, missed_at, $3 AS clinic_status
 			 FROM queue_tickets WHERE clinic_id = $1 AND queue_date = $2 ORDER BY queue_number`,
 			[clinicId, date, clinicStatus],
 		);
@@ -232,11 +239,11 @@ const tickets = await getQueueTickets(clinicResult.rows[0].id, clinicName, queue
 }
 
 async function createQueueTicket(clinicName, medicationName = null) {
-	const requestedMedication = medicationName ? String(medicationName).trim() : null;
-	if (requestedMedication) {
+	const requestedMedications = normalizeRequestedMedications(medicationName);
+	for (const requestedMedication of requestedMedications) {
 		const medicationResult = await pool.query("SELECT name, stock_count AS \"stockCount\" FROM medications WHERE name = $1", [requestedMedication]);
-		if (!medicationResult.rows[0]) return { error: "Medication not found.", status: 404 };
-		if (Number(medicationResult.rows[0].stockCount) <= 0) return { error: "This medication is currently out of stock.", status: 409 };
+		if (!medicationResult.rows[0]) return { error: `${requestedMedication} was not found.`, status: 404 };
+		if (Number(medicationResult.rows[0].stockCount) <= 0) return { error: `${requestedMedication} is currently out of stock.`, status: 409 };
 	}
 	if (!process.env.DATABASE_URL) {
 		const clinic = (await pool.query("SELECT id, name, status FROM clinics WHERE name = $1", [clinicName])).rows[0];
@@ -244,7 +251,8 @@ async function createQueueTicket(clinicName, medicationName = null) {
 		if (clinic.status === "Closed") return { error: "This clinic is currently closed.", status: 409 };
 		expireTickets(memoryQueueTickets);
 		const ticket = allocateTicket(memoryQueueTickets, clinicName, new Date(), clinic.status);
-		ticket.requestedMedication = requestedMedication;
+		ticket.requestedMedications = requestedMedications;
+		ticket.requestedMedication = requestedMedications[0] || null;
 		ticket.medicationCollected = false;
 		memoryQueueTickets.push(ticket);
 		return { ticket: publicTicket(ticket, memoryQueueTickets, new Date(), clinic.status), capability: ticket.raw };
@@ -263,20 +271,21 @@ async function createQueueTicket(clinicName, medicationName = null) {
 			await client.query("ROLLBACK");
 			return { error: "This clinic is currently closed.", status: 409 };
 		}
-		await client.query("UPDATE queue_tickets SET status = 'missed' WHERE status = 'called' AND call_expires_at <= NOW()");
+		await client.query("UPDATE queue_tickets SET status = 'missed', missed_at = NOW() WHERE status IN ('ready', 'called') AND call_expires_at <= NOW()");
 		const result = await client.query(
-			`SELECT id, queue_date::text AS queue_date, queue_number, issued_queue_number, status, scheduled_at, called_at, call_expires_at, capability_hash, created_at, requested_medication, medication_collected, collected_at
+			`SELECT id, queue_date::text AS queue_date, queue_number, issued_queue_number, status, scheduled_at, called_at, call_expires_at, capability_hash, created_at, requested_medication, medication_collected, collected_at, served_at, cancelled_at, missed_at
 			 FROM queue_tickets WHERE clinic_id = $1 AND queue_date = CURRENT_DATE ORDER BY queue_number FOR UPDATE`,
 			[clinic.id],
 		);
 		const existing = result.rows.map((row) => ticketFromRow(row, clinicName));
 		const ticket = allocateTicket(existing, clinicName, new Date(), clinic.status);
-		ticket.requestedMedication = requestedMedication;
+		ticket.requestedMedications = requestedMedications;
+		ticket.requestedMedication = requestedMedications[0] || null;
 		ticket.medicationCollected = false;
 		await client.query(
 			`INSERT INTO queue_tickets (id, clinic_id, queue_date, queue_number, issued_queue_number, status, scheduled_at, capability_hash, created_at, requested_medication, medication_collected)
 			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
-			[ticket.id, clinic.id, ticket.queueDate, ticket.queueNumber, ticket.issuedQueueNumber, ticket.status, ticket.scheduledAt, ticket.capabilityHash, ticket.createdAt, ticket.requestedMedication, ticket.medicationCollected],
+			[ticket.id, clinic.id, ticket.queueDate, ticket.queueNumber, ticket.issuedQueueNumber, ticket.status, ticket.scheduledAt, ticket.capabilityHash, ticket.createdAt, JSON.stringify(requestedMedications), ticket.medicationCollected],
 		);
 		await client.query("COMMIT");
 		return { ticket: publicTicket(ticket, [...existing, ticket], new Date(), clinic.status), capability: ticket.raw };
@@ -296,13 +305,100 @@ async function findTicket(ticketId, capability) {
 		return { ticket, tickets: memoryQueueTickets.filter((item) => item.clinicName === ticket.clinicName && item.queueDate === ticket.queueDate) };
 	}
 	const result = await pool.query(
-		`SELECT q.id, q.queue_date::text AS queue_date, q.queue_number, q.issued_queue_number, q.status, q.scheduled_at, q.called_at, q.call_expires_at, q.capability_hash, q.created_at, c.name AS clinic_name, c.status AS clinic_status
+			`SELECT q.id, q.queue_date::text AS queue_date, q.queue_number, q.issued_queue_number, q.status, q.scheduled_at, q.called_at, q.call_expires_at, q.capability_hash, q.created_at, q.requested_medication, q.medication_collected, q.collected_at, q.served_at, q.cancelled_at, q.missed_at, c.name AS clinic_name, c.status AS clinic_status
 		 FROM queue_tickets q JOIN clinics c ON c.id = q.clinic_id WHERE q.id = $1 AND q.capability_hash = encode(digest($2, 'sha256'), 'hex')`,
 		[ticketId, capability],
 	);
 	if (!result.rows[0]) return null;
 	const ticket = ticketFromRow(result.rows[0], result.rows[0].clinic_name);
 	return { ticket, tickets: await getQueueTickets(null, ticket.clinicName, ticket.queueDate) };
+}
+
+async function settleDatabaseTicket(ticketId, capability, staffClinicName = null) {
+	const client = await pool.connect();
+	try {
+		await client.query("BEGIN");
+		const ticketLookup = staffClinicName
+			? { text: `SELECT q.id, q.queue_date::text AS queue_date, q.queue_number, q.issued_queue_number, q.status, q.scheduled_at, q.called_at, q.call_expires_at, q.capability_hash, q.created_at, q.requested_medication, q.medication_collected, q.collected_at, q.served_at, q.cancelled_at, q.missed_at, c.name AS clinic_name, c.status AS clinic_status
+				 FROM queue_tickets q JOIN clinics c ON c.id = q.clinic_id WHERE q.id = $1 AND c.name = $2 FOR UPDATE`, values: [ticketId, staffClinicName] }
+			: { text: `SELECT q.id, q.queue_date::text AS queue_date, q.queue_number, q.issued_queue_number, q.status, q.scheduled_at, q.called_at, q.call_expires_at, q.capability_hash, q.created_at, q.requested_medication, q.medication_collected, q.collected_at, q.served_at, q.cancelled_at, q.missed_at, c.name AS clinic_name, c.status AS clinic_status
+				 FROM queue_tickets q JOIN clinics c ON c.id = q.clinic_id WHERE q.id = $1 AND q.capability_hash = encode(digest($2, 'sha256'), 'hex') FOR UPDATE`, values: [ticketId, capability] };
+		const ticketResult = await client.query(
+			ticketLookup.text,
+			ticketLookup.values,
+		);
+		if (!ticketResult.rows[0]) {
+			await client.query("ROLLBACK");
+			return { error: "Queue ticket not found or access has expired.", status: 404 };
+		}
+		const row = ticketResult.rows[0];
+		if (!["ready", "called"].includes(row.status)) {
+			await client.query("ROLLBACK");
+			return { error: "Only ready tickets can be served.", status: 409 };
+		}
+		if (row.medication_collected) {
+			await client.query("ROLLBACK");
+			return { error: "This ticket has already been served.", status: 409 };
+		}
+		const dueResult = await client.query("SELECT 1 FROM queue_tickets WHERE id = $1 AND scheduled_at <= NOW()", [ticketId]);
+		if (!dueResult.rows[0]) {
+			await client.query("ROLLBACK");
+			return { error: "This ticket is not ready for service yet.", status: 409 };
+		}
+
+		const requestedMedications = normalizeRequestedMedications(row.requested_medication);
+		let medicationCollected = false;
+		for (const requestedMedication of requestedMedications) {
+			const medicationResult = await client.query(
+				`UPDATE medications
+				 SET stock_count = stock_count - 1,
+				     availability = CASE WHEN stock_count - 1 = 0 THEN 'Out of Stock' WHEN stock_count - 1 >= 250 THEN 'In Stock' ELSE 'Low Stock' END
+				 WHERE name = $1 AND stock_count > 0
+				 RETURNING stock_count AS "stockCount"`,
+				[requestedMedication],
+			);
+			if (!medicationResult.rows[0]) {
+				await client.query("ROLLBACK");
+				return { error: "The requested medication is out of stock.", status: 409 };
+			}
+			medicationCollected = true;
+		}
+
+		const servedResult = await client.query(
+			`UPDATE queue_tickets
+			 SET status = 'served', served_at = NOW(), medication_collected = $2, collected_at = CASE WHEN $2 THEN NOW() ELSE collected_at END
+			 WHERE id = $1 AND status IN ('ready', 'called') AND medication_collected = FALSE
+			 RETURNING id, queue_date::text AS queue_date, queue_number, issued_queue_number, status, scheduled_at, called_at, call_expires_at, capability_hash, created_at, requested_medication, medication_collected, collected_at, served_at, cancelled_at, missed_at`,
+			[ticketId, medicationCollected],
+		);
+		if (!servedResult.rows[0]) {
+			await client.query("ROLLBACK");
+			return { error: "This ticket was already updated.", status: 409 };
+		}
+		await client.query("COMMIT");
+		return { ticket: ticketFromRow({ ...servedResult.rows[0], clinic_status: row.clinic_status }, row.clinic_name) };
+	} catch (error) {
+		await client.query("ROLLBACK");
+		throw error;
+	} finally {
+		client.release();
+	}
+}
+
+async function collectMemoryTicketMedication(ticket) {
+	const medications = normalizeRequestedMedications(ticket.requestedMedications?.length ? ticket.requestedMedications : ticket.requestedMedication);
+	if (medications.length === 0) return true;
+	const medicationRows = [];
+	for (const name of medications) {
+		const rows = (await pool.query("SELECT name, stock_count AS \"stockCount\" FROM medications WHERE name = $1", [name])).rows;
+		if (!rows[0]) return false;
+		medicationRows.push(rows[0]);
+	}
+	if (!markMedicationCollected(ticket, medicationRows)) return false;
+	for (const medication of medicationRows) {
+		await pool.query("UPDATE medications SET stock_count = $1, availability = $2, updated_at = NOW() WHERE name = $3", [medication.stockCount, medication.stockCount === 0 ? "Out of Stock" : medication.stockCount >= 250 ? "In Stock" : "Low Stock", medication.name]);
+	}
+	return true;
 }
 
 const send = (response, status, body) => {
@@ -363,6 +459,7 @@ async function ensureDatabase() {
 	await pool.query(`ALTER TABLE medications ADD COLUMN IF NOT EXISTS availability VARCHAR(20) NOT NULL DEFAULT 'In Stock'`);
 	await pool.query(`ALTER TABLE medications ADD COLUMN IF NOT EXISTS clinics VARCHAR(255) NOT NULL DEFAULT ''`);
 	await pool.query(`ALTER TABLE medications ADD COLUMN IF NOT EXISTS stock_count INTEGER NOT NULL DEFAULT 0`);
+	await pool.query(`ALTER TABLE medications ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()`);
 	await pool.query(`ALTER TABLE clinics ADD COLUMN IF NOT EXISTS wait INTEGER`);
 	await pool.query(`ALTER TABLE clinics ADD COLUMN IF NOT EXISTS province VARCHAR(100) NOT NULL DEFAULT 'Gauteng'`);
 	await pool.query(`ALTER TABLE clinics ADD COLUMN IF NOT EXISTS patients INTEGER NOT NULL DEFAULT 0`);
@@ -406,6 +503,9 @@ async function ensureDatabase() {
 			requested_medication VARCHAR(255),
 			medication_collected BOOLEAN NOT NULL DEFAULT FALSE,
 			collected_at TIMESTAMP WITH TIME ZONE,
+			served_at TIMESTAMP WITH TIME ZONE,
+			cancelled_at TIMESTAMP WITH TIME ZONE,
+			missed_at TIMESTAMP WITH TIME ZONE,
 			UNIQUE (clinic_id, queue_date, queue_number)
 		)
 	`);
@@ -414,6 +514,9 @@ async function ensureDatabase() {
 	await pool.query("ALTER TABLE queue_tickets ADD COLUMN IF NOT EXISTS requested_medication VARCHAR(255)");
 	await pool.query("ALTER TABLE queue_tickets ADD COLUMN IF NOT EXISTS medication_collected BOOLEAN NOT NULL DEFAULT FALSE");
 	await pool.query("ALTER TABLE queue_tickets ADD COLUMN IF NOT EXISTS collected_at TIMESTAMP WITH TIME ZONE");
+	await pool.query("ALTER TABLE queue_tickets ADD COLUMN IF NOT EXISTS served_at TIMESTAMP WITH TIME ZONE");
+	await pool.query("ALTER TABLE queue_tickets ADD COLUMN IF NOT EXISTS cancelled_at TIMESTAMP WITH TIME ZONE");
+	await pool.query("ALTER TABLE queue_tickets ADD COLUMN IF NOT EXISTS missed_at TIMESTAMP WITH TIME ZONE");
 	await pool.query("UPDATE queue_tickets SET issued_queue_number = queue_number WHERE issued_queue_number IS NULL");
 	await pool.query(`
 		WITH ranked_waiting AS (
@@ -463,7 +566,6 @@ async function ensureDatabase() {
 			[medication.name, medication.category, medication.availability, medication.clinics, medication.stockCount],
 		);
 	}
-	await pool.query(`UPDATE medications SET stock_count = CASE WHEN name IN ('Amoxicillin 500mg Capsules', 'Lisinopril 10mg Tablets') THEN 50 WHEN name IN ('Albuterol 90mcg Inhaler', 'Metformin 850mg Tablets', 'Paracetamol 500mg Tablets') THEN 250 ELSE stock_count END WHERE stock_count = 0`);
 	await pool.query(`UPDATE medications SET availability = CASE WHEN stock_count = 0 THEN 'Out of Stock' WHEN stock_count >= 250 THEN 'In Stock' ELSE 'Low Stock' END`);
 	await pool.query(`UPDATE clinics SET wait = 12, patients = 4, stock = 98 WHERE name = 'Metro Family Care Centre' AND wait IS NULL`);
 	await pool.query(`UPDATE clinics SET wait = 35, patients = 14, stock = 84 WHERE name = 'Northside Public Health Clinic' AND wait IS NULL`);
@@ -498,7 +600,7 @@ async function handleRequest(request, response) {
 		if (request.method === "GET" && request.url === "/api/public-data") {
 			const [clinicResult, medicationResult] = await Promise.all([
 				pool.query("SELECT name, province, district, address, hours, phone, wait, patients, stock, status, updated_at AS \"updatedAt\" FROM clinics ORDER BY id"),
-				pool.query("SELECT name, category, availability, clinics, stock_count AS \"stockCount\" FROM medications ORDER BY id"),
+				pool.query("SELECT name, category, availability, clinics, stock_count AS \"stockCount\", updated_at AS \"updatedAt\" FROM medications ORDER BY id"),
 			]);
 			const clinicsWithQueue = await Promise.all(clinicResult.rows.map(async (clinic) => {
 				const queue = await getClinicQueue(clinic.name);
@@ -517,7 +619,7 @@ async function handleRequest(request, response) {
 		}
 		if (queueCreateMatch && request.method === "POST") {
 			const body = await readBody(request);
-			const result = await createQueueTicket(decodeURIComponent(queueCreateMatch[1]), body?.medication || null);
+			const result = await createQueueTicket(decodeURIComponent(queueCreateMatch[1]), body?.medications ?? body?.medication ?? null);
 			return result.ticket ? send(response, 201, result) : send(response, result.status, { error: result.error });
 		}
 
@@ -527,43 +629,77 @@ async function handleRequest(request, response) {
 			return result ? send(response, 200, publicTicket(result.ticket, result.tickets)) : send(response, 404, { error: "Queue ticket not found or access has expired." });
 		}
 
-		const ticketActionMatch = request.url.match(/^\/api\/queue-tickets\/([^/]+)\/(leave|call|complete|miss)$/);
+		const staffTicketActionMatch = request.url.match(/^\/api\/clinics\/([^/]+)\/queue-tickets\/([^/]+)\/(approve|serve|miss)$/);
+		if (staffTicketActionMatch && request.method === "POST") {
+			const clinicName = decodeURIComponent(staffTicketActionMatch[1]);
+			const ticketId = staffTicketActionMatch[2];
+			const action = staffTicketActionMatch[3];
+			if (action === "serve" && process.env.DATABASE_URL) {
+				const settlement = await settleDatabaseTicket(ticketId, null, clinicName);
+				if (!settlement.ticket) return send(response, settlement.status, { error: settlement.error });
+				const refreshedTickets = await getQueueTickets(null, clinicName, settlement.ticket.queueDate);
+				return send(response, 200, publicTicket(settlement.ticket, refreshedTickets));
+			}
+			if (process.env.DATABASE_URL) {
+				const result = action === "approve"
+					? await pool.query("UPDATE queue_tickets q SET status = 'ready', called_at = NOW(), call_expires_at = NOW() + ($3 * INTERVAL '1 minute') FROM clinics c WHERE q.id = $1 AND q.clinic_id = c.id AND c.name = $2 AND q.status = 'waiting' RETURNING q.id", [ticketId, clinicName, 5])
+					: await pool.query("UPDATE queue_tickets q SET status = 'missed', missed_at = NOW() FROM clinics c WHERE q.id = $1 AND q.clinic_id = c.id AND c.name = $2 AND q.status IN ('waiting', 'ready', 'called') RETURNING q.id", [ticketId, clinicName]);
+				if (!result.rows[0]) return send(response, 409, { error: "This ticket cannot be updated in its current state." });
+				const tickets = await getQueueTickets(null, clinicName, queueDate());
+				const updated = tickets.find((ticket) => ticket.id === ticketId);
+				return send(response, 200, publicTicket(updated, tickets));
+			}
+			const ticket = memoryQueueTickets.find((item) => item.id === ticketId && item.clinicName === clinicName);
+			if (!ticket) return send(response, 404, { error: "Queue ticket not found." });
+			if (action === "approve") {
+				if (!callTicket(ticket)) return send(response, 409, { error: "Only waiting tickets can be approved." });
+			} else if (action === "serve") {
+				if (!canServeTicket(ticket)) return send(response, 409, { error: "This ticket is not ready for service yet." });
+				if (!await collectMemoryTicketMedication(ticket)) return send(response, 409, { error: "One or more requested medications are out of stock." });
+				ticket.status = "served";
+				ticket.servedAt = new Date().toISOString();
+			} else {
+				if (!["waiting", "ready", "called"].includes(ticket.status)) return send(response, 409, { error: "This ticket cannot be marked missed." });
+				ticket.status = "missed";
+				ticket.missedAt = new Date().toISOString();
+			}
+			return send(response, 200, publicTicket(ticket, memoryQueueTickets));
+		}
+
+		const ticketActionMatch = request.url.match(/^\/api\/queue-tickets\/([^/]+)\/(leave|approve|call|complete|miss)$/);
 		if (ticketActionMatch && request.method === "POST") {
 			const body = await readBody(request);
+			const action = ticketActionMatch[2];
+			if (action === "complete" && process.env.DATABASE_URL) {
+				const settlement = await settleDatabaseTicket(ticketActionMatch[1], body.token);
+				if (!settlement.ticket) return send(response, settlement.status, { error: settlement.error });
+				const refreshedTickets = await getQueueTickets(null, settlement.ticket.clinicName, settlement.ticket.queueDate);
+				return send(response, 200, publicTicket(settlement.ticket, refreshedTickets));
+			}
 			const result = await findTicket(ticketActionMatch[1], body.token);
 			if (!result) return send(response, 404, { error: "Queue ticket not found or access has expired." });
-			const action = ticketActionMatch[2];
 			if (action === "leave") {
 				if (result.ticket.status !== "waiting") return send(response, 409, { error: "Only waiting tickets can leave the queue." });
 				result.ticket.status = "left";
-			} else if (action === "call") {
+				result.ticket.cancelledAt = new Date().toISOString();
+			} else if (action === "approve" || action === "call") {
 				if (!callTicket(result.ticket)) return send(response, 409, { error: "This ticket cannot be called in its current state." });
 			} else if (action === "complete") {
-				if (result.ticket.status !== "called") return send(response, 409, { error: "Only called tickets can be completed." });
+				if (!canServeTicket(result.ticket)) return send(response, 409, { error: "This ticket is not ready for service yet." });
+				if (!await collectMemoryTicketMedication(result.ticket)) return send(response, 409, { error: "One or more requested medications are out of stock." });
 				result.ticket.status = "served";
-				if (result.ticket.requestedMedication) {
-					const medicationList = (await pool.query("SELECT name, stock_count AS \"stockCount\" FROM medications WHERE name = $1", [result.ticket.requestedMedication])).rows;
-					if (process.env.DATABASE_URL) {
-						const medication = medicationList[0];
-						if (medication && Number(medication.stockCount) > 0) {
-							const nextStock = Math.max(0, Number(medication.stockCount) - 1);
-							await pool.query("UPDATE medications SET stock_count = $1, availability = $2 WHERE name = $3", [nextStock, nextStock === 0 ? "Out of Stock" : nextStock >= 250 ? "In Stock" : "Low Stock", result.ticket.requestedMedication]);
-							result.ticket.medicationCollected = true;
-							result.ticket.collectedAt = new Date().toISOString();
-						}
-					}
-				}
+				result.ticket.servedAt = new Date().toISOString();
 			} else if (action === "miss") {
-				if (!["waiting", "called"].includes(result.ticket.status)) return send(response, 409, { error: "This ticket cannot be marked missed." });
+				if (!["waiting", "ready", "called"].includes(result.ticket.status)) return send(response, 409, { error: "This ticket cannot be marked missed." });
 				result.ticket.status = "missed";
+				result.ticket.missedAt = new Date().toISOString();
 			}
 			if (!process.env.DATABASE_URL) {
-				if (result.ticket.requestedMedication && action === "complete") markMedicationCollected(result.ticket, (await pool.query("SELECT name, stock_count AS \"stockCount\" FROM medications WHERE name = $1", [result.ticket.requestedMedication])).rows);
 				return send(response, 200, publicTicket(result.ticket, memoryQueueTickets));
 			}
 			await pool.query(
-				`UPDATE queue_tickets SET status = $1, called_at = $2, call_expires_at = $3, medication_collected = $4, collected_at = $5 WHERE id = $6`,
-				[result.ticket.status, result.ticket.calledAt, result.ticket.callExpiresAt, Boolean(result.ticket.medicationCollected), result.ticket.collectedAt, result.ticket.id],
+				`UPDATE queue_tickets SET status = $1, called_at = $2, call_expires_at = $3, medication_collected = $4, collected_at = $5, served_at = $6, cancelled_at = $7, missed_at = $8 WHERE id = $9`,
+				[result.ticket.status, result.ticket.calledAt, result.ticket.callExpiresAt, Boolean(result.ticket.medicationCollected), result.ticket.collectedAt, result.ticket.servedAt || null, result.ticket.cancelledAt || null, result.ticket.missedAt || null, result.ticket.id],
 			);
 				const refreshedTickets = await getQueueTickets(null, result.ticket.clinicName, result.ticket.queueDate);
 				return send(response, 200, publicTicket(result.ticket, refreshedTickets));
@@ -619,7 +755,7 @@ async function handleRequest(request, response) {
 			}
 			const stockCount = parsedStock.value;
 			const result = await pool.query(
-				"UPDATE medications SET availability = $1, clinics = $2, stock_count = $3 WHERE name = $4 RETURNING name, category, availability, clinics, stock_count AS \"stockCount\"",
+				"UPDATE medications SET availability = $1, clinics = $2, stock_count = $3, updated_at = NOW() WHERE name = $4 RETURNING name, category, availability, clinics, stock_count AS \"stockCount\", updated_at AS \"updatedAt\"",
 				[getAvailability(stockCount), String(body.clinics || "All clinics").trim() || "All clinics", stockCount, decodeURIComponent(medicationUpdateMatch[1])],
 			);
 			return result.rows[0] ? send(response, 200, result.rows[0]) : send(response, 404, { error: "Medication not found." });

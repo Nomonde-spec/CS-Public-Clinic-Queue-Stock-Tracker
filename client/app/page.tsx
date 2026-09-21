@@ -19,7 +19,7 @@ type Clinic = {
   distance: number;
   updatedAt?: string;
 };
-type QueueTicket = { id: string; clinicName: string; queueNumber: number; status: "waiting" | "called" | "served" | "missed" | "left"; scheduledAt: string; calledAt: string | null; callExpiresAt: string | null; position: number | null; peopleAhead?: number; estimatedWait: number; patients: number; wait: number; requestedMedication?: string | null; medicationCollected?: boolean; collectedAt?: string | null };
+type QueueTicket = { id: string; clinicName: string; queueNumber: number; status: "waiting" | "ready" | "called" | "served" | "missed" | "left"; scheduledAt: string; calledAt: string | null; callExpiresAt: string | null; position: number | null; peopleAhead?: number; estimatedWait: number; patients: number; wait: number; requestedMedication?: string | null; requestedMedications?: string[]; medicationCollected?: boolean; collectedAt?: string | null; servedAt?: string | null };
 
 type Medication = {
   name: string;
@@ -27,6 +27,7 @@ type Medication = {
   availability: "In Stock" | "Low Stock" | "Out of Stock";
   clinics: string;
   stockCount: number;
+  updatedAt?: string;
 };
 
 type StaffRegistration = {
@@ -82,7 +83,7 @@ function AlertBar({ admin = false }: { admin?: boolean }) {
 }
 
 function PublicHeader({ view, onNavigate }: { view: View; onNavigate: (view: View) => void }) {
-  return <><AlertBar /><header className="site-header"><Logo /><nav><button className={view === "home" ? "active" : ""} onClick={() => onNavigate("home")}>Dashboard</button><button className={view === "clinics" || view === "clinic" ? "active" : ""} onClick={() => onNavigate("clinics")}>Find a Clinic</button><button className={view === "medications" ? "active" : ""} onClick={() => onNavigate("medications")}>Medication Search</button></nav><div className="header-status"><span className="dot" /> LIVE STATUS <small>No login required</small></div><button className="header-access" onClick={() => onNavigate("login")}>Staff/Admin Login / Register</button></header></>;
+  return <header className="site-header"><Logo /><nav><button className={view === "home" ? "active" : ""} onClick={() => onNavigate("home")}>Dashboard</button><button className={view === "clinics" || view === "clinic" ? "active" : ""} onClick={() => onNavigate("clinics")}>Find a Clinic</button><button className={view === "medications" ? "active" : ""} onClick={() => onNavigate("medications")}>Medication Search</button></nav><div className="header-status"><span className="dot" /> LIVE STATUS <small>No login required</small></div><button className="header-access" onClick={() => onNavigate("login")}>Staff/Admin Login / Register</button></header>;
 }
 
 function AdminHeader({ view, onNavigate, onLogout }: { view: View; onNavigate: (view: View) => void; onLogout: () => void }) {
@@ -121,6 +122,11 @@ function formatUpdatedAt(updatedAt?: string) {
   return minutes === 0 ? "Updated just now" : `Updated ${minutes} minute${minutes === 1 ? "" : "s"} ago`;
 }
 
+function latestMedicationUpdate() {
+  const timestamps = medications.map((medication) => medication.updatedAt).filter(Boolean).map((value) => new Date(value as string).getTime());
+  return timestamps.length > 0 ? new Date(Math.max(...timestamps)).toISOString() : undefined;
+}
+
 function PublicHome({ onNavigate, onClinic }: { onNavigate: (view: View) => void; onClinic: (clinic: Clinic) => void }) {
   const [selectedClinic, setSelectedClinic] = useState("");
   const [selectedMedication, setSelectedMedication] = useState("");
@@ -134,7 +140,7 @@ function PublicHome({ onNavigate, onClinic }: { onNavigate: (view: View) => void
 
 function MedicationTable({ compact = false, query = "" }: { compact?: boolean; query?: string }) {
   const filtered = medications.filter((medicine) => medicine.name.toLowerCase().includes(query.toLowerCase()) || medicine.category.toLowerCase().includes(query.toLowerCase()));
-  return <div className="table-wrap"><table><thead><tr><th>Medication name & strength</th><th>Category</th><th>Overall availability</th><th>Reporting dispensaries</th></tr></thead><tbody>{(compact ? filtered.slice(0, 5) : filtered).map((medicine) => <tr key={medicine.name}><td><strong>{medicine.name}</strong></td><td>{medicine.category}</td><td><StatusPill value={medicine.availability} /></td><td>{medicine.clinics}</td></tr>)}</tbody></table>{filtered.length === 0 && <div className="empty">No medicines match that search.</div>}</div>;
+  return <div className="table-wrap"><table><thead><tr><th>Medication name & strength</th><th>Category</th><th>Overall availability</th></tr></thead><tbody>{(compact ? filtered.slice(0, 5) : filtered).map((medicine) => <tr key={medicine.name}><td><strong>{medicine.name}</strong></td><td>{medicine.category}</td><td><StatusPill value={medicine.availability} /></td></tr>)}</tbody></table>{filtered.length === 0 && <div className="empty">No medicines match that search.</div>}</div>;
 }
 
 function Clinics({ onClinic }: { onClinic: (clinic: Clinic) => void }) {
@@ -149,11 +155,11 @@ function Clinics({ onClinic }: { onClinic: (clinic: Clinic) => void }) {
 
 function Medications() {
   const [query, setQuery] = useState("Amoxicillin");
-  return <main className="public-main page-main"><div className="page-title"><div><p className="eyebrow">MEDICATION AVAILABILITY</p><h1>Find clinics with medication stock</h1><p>Select a medication to view current availability across public clinics.</p></div></div><div className="med-search"><select className="medication-search-select" value={query} onChange={(event) => setQuery(event.target.value)}><option value="">Select a medication</option>{medications.map((medication) => <option key={medication.name} value={medication.name}>{medication.name}</option>)}</select><button>Search stock</button></div><section className="results-section"><div className="section-heading"><div><p className="eyebrow">LIVE STOCK AUDIT</p><h2>Results for &quot;{query || "all medication"}&quot;</h2></div><span>Updated just now</span></div><MedicationTable query={query} /></section></main>;
+  return <main className="public-main page-main"><div className="page-title"><div><p className="eyebrow">MEDICATION AVAILABILITY</p><h1>Find clinics with medication stock</h1><p>Select a medication to view current availability across public clinics.</p></div></div><div className="med-search"><select className="medication-search-select" value={query} onChange={(event) => setQuery(event.target.value)}><option value="">Select a medication</option>{medications.map((medication) => <option key={medication.name} value={medication.name}>{medication.name}</option>)}</select><button>Search stock</button></div><section className="results-section"><div className="section-heading"><div><p className="eyebrow">LIVE STOCK AUDIT</p><h2>Results for &quot;{query || "all medication"}&quot;</h2></div><span>{formatUpdatedAt(latestMedicationUpdate())}</span></div><MedicationTable query={query} /></section></main>;
 }
 
 function ClinicDetailsLegacy({ clinic, onBack }: { clinic: Clinic; onBack: () => void }) {
-  return <main className="public-main page-main"><button className="back-button" onClick={onBack}>Back to clinic directory</button><div className="detail-grid"><section><div className="detail-card"><StatusPill value={clinic.status} /><span>Last updated: 4 minutes ago</span><h1>{clinic.name}</h1><p>Primary community triage and medication dispensing location.</p><hr /><p>Address: {clinic.address}</p><p>Hours: {clinic.hours}</p><p>Phone: {clinic.phone}</p></div><div className="detail-card chart-card"><h2>Today&apos;s queue activity</h2><p>Historical average wait times compared with the current status.</p><div className="bars"><i style={{ height: "34%" }} /><i style={{ height: "60%" }} /><i style={{ height: "85%" }} /><i className="current" style={{ height: "28%" }} /><i style={{ height: "50%" }} /></div><div className="chart-labels"><span>9 AM</span><span>11 AM</span><span>1 PM</span><span>3 PM</span><span>5 PM</span></div></div></section><section className="detail-card inventory-card"><div className="section-heading"><div><h2>Pharmacy inventory</h2><p>Medication availability currently reported by this clinic.</p></div><span className="live"><span className="dot" /> Updated 10 minutes ago</span></div><MedicationTable /></section></div></main>;
+  return <main className="public-main page-main"><button className="back-button" onClick={onBack}>Back to clinic directory</button><div className="detail-grid"><section><div className="detail-card"><StatusPill value={clinic.status} /><span>Last updated: 4 minutes ago</span><h1>{clinic.name}</h1><p>Primary community triage and medication dispensing location.</p><hr /><p>Address: {clinic.address}</p><p>Hours: {clinic.hours}</p><p>Phone: {clinic.phone}</p></div></section><section className="detail-card inventory-card"><div className="section-heading"><div><h2>Pharmacy inventory</h2><p>Medication availability currently reported by this clinic.</p></div><span className="live"><span className="dot" /> {formatUpdatedAt(latestMedicationUpdate())}</span></div><MedicationTable /></section></div></main>;
 }
 
 function PatientQueue({ clinic }: { clinic: Clinic }) {
@@ -163,7 +169,7 @@ function PatientQueue({ clinic }: { clinic: Clinic }) {
   const [loading, setLoading] = useState(false);
   const [message, setMessage] = useState("");
   const [clock, setClock] = useState(() => Date.now());
-  const [selectedMedication, setSelectedMedication] = useState(medications[0]?.name ?? "");
+  const [selectedMedications, setSelectedMedications] = useState<string[]>(medications[0]?.name ? [medications[0].name] : []);
   const availableMedications = medications.filter((entry) => entry.stockCount > 0);
   const loadTicket = async (ticketId: string, accessToken: string) => {
     const response = await fetch(`${apiUrl}/api/queue-tickets/${ticketId}?token=${encodeURIComponent(accessToken)}`);
@@ -171,14 +177,14 @@ function PatientQueue({ clinic }: { clinic: Clinic }) {
     setTicket(await response.json() as QueueTicket);
   };
   useEffect(() => {
-    const saved = window.localStorage.getItem(storageKey);
+    const saved = window.sessionStorage.getItem(storageKey);
     if (!saved) return;
     const timer = window.setTimeout(() => {
       try {
         const parsed = JSON.parse(saved) as { id: string; token: string };
-        loadTicket(parsed.id, parsed.token).then(() => setToken(parsed.token)).catch(() => window.localStorage.removeItem(storageKey));
+        loadTicket(parsed.id, parsed.token).then(() => setToken(parsed.token)).catch(() => window.sessionStorage.removeItem(storageKey));
       } catch {
-        window.localStorage.removeItem(storageKey);
+        window.sessionStorage.removeItem(storageKey);
       }
     }, 0);
     return () => window.clearTimeout(timer);
@@ -196,13 +202,13 @@ function PatientQueue({ clinic }: { clinic: Clinic }) {
     setLoading(true);
     setMessage("");
     try {
-      const payload = selectedMedication ? { medication: selectedMedication } : {};
+      const payload = selectedMedications.length > 0 ? { medications: selectedMedications } : {};
       const response = await fetch(`${apiUrl}/api/clinics/${encodeURIComponent(clinic.name)}/queue-tickets`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
       const result = await response.json() as { ticket?: QueueTicket; capability?: string; error?: string };
       if (!response.ok || !result.ticket || !result.capability) throw new Error(result.error || "Could not join the queue.");
       setTicket(result.ticket);
       setToken(result.capability);
-      window.localStorage.setItem(storageKey, JSON.stringify({ id: result.ticket.id, token: result.capability }));
+      window.sessionStorage.setItem(storageKey, JSON.stringify({ id: result.ticket.id, token: result.capability }));
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Could not join the queue.");
     } finally {
@@ -217,7 +223,7 @@ function PatientQueue({ clinic }: { clinic: Clinic }) {
       const result = await response.json() as QueueTicket & { error?: string };
       if (!response.ok) throw new Error(result.error || "Could not leave the queue.");
       setTicket(result);
-      window.localStorage.removeItem(storageKey);
+      window.sessionStorage.removeItem(storageKey);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Could not leave the queue.");
     } finally {
@@ -225,14 +231,22 @@ function PatientQueue({ clinic }: { clinic: Clinic }) {
     }
   };
   const peopleAhead = ticket ? ticket.peopleAhead ?? Math.max((ticket.position ?? 1) - 1, 0) : 0;
+  const requestNewTicket = () => {
+    window.sessionStorage.removeItem(storageKey);
+    setTicket(null);
+    setToken("");
+    setMessage("");
+  };
   const displayedQueueNumber = ticket?.status === "waiting" ? peopleAhead + 1 : ticket?.queueNumber;
-  const displayedScheduledAt = ticket?.status === "waiting" ? new Date(clock + peopleAhead * 5 * 60000).toISOString() : ticket?.scheduledAt;
-  const statusText = ticket?.status === "called" ? ticket?.requestedMedication ? `Please proceed to collect ${ticket.requestedMedication}.` : "Please proceed to the clinic desk now." : ticket?.status === "served" ? ticket?.medicationCollected ? `${ticket.requestedMedication ?? "Medication"} has been handed over.` : "Your visit is complete." : ticket?.status === "missed" ? "This number was missed. Request a new number to join again." : ticket?.status === "left" ? "You left this queue." : "Your number is active.";
-  return <section className="detail-card queue-checkin-card"><div className="section-heading"><div><p className="eyebrow">PATIENT CHECK-IN</p><h2>Request a queue number</h2><p>Each clinic has its own live queue. Your allocated time updates from the people ahead of you.</p></div>{ticket && <StatusPill value={ticket.status === "waiting" ? "Waiting" : ticket.status} />}</div>{ticket ? <><div className="ticket-number">#{displayedQueueNumber}<small>{ticket.status === "left" ? "YOUR ISSUED QUEUE NUMBER" : "YOUR QUEUE NUMBER"}</small></div>{ticket.requestedMedication && <div className="queue-message">Medication: <strong>{ticket.requestedMedication}</strong>{ticket.medicationCollected ? " • Collected" : " • Pending collection"}</div>}<div className="queue-ticket-details"><span><strong>{peopleAhead}</strong> people ahead</span><span><strong>{ticket.estimatedWait}</strong> min estimated wait</span><span><strong>{displayedScheduledAt ? new Date(displayedScheduledAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "-"}</strong> allocated time</span></div><p className="queue-message">{statusText}</p>{ticket.status === "waiting" && <button className="secondary-button" disabled={loading} onClick={leaveQueue}>{loading ? "Updating..." : "Leave queue"}</button>}{["missed", "served", "left"].includes(ticket.status) && <button className="primary-button" disabled={loading || clinic.status === "Closed"} onClick={() => { setTicket(null); setToken(""); setMessage(""); }}>{clinic.status === "Closed" ? "Clinic closed" : "Request a new number"}</button>}</> : <><div className="queue-ticket-details"><span><strong>{clinic.patients}</strong> patients ahead</span><span><strong>{clinic.patients * getWaitPerPatient(clinic.status)}</strong> min estimated wait</span><span><strong>{clinic.status === "Closed" ? "Closed" : "Next available"}</strong> service</span></div><p>See how many patients are ahead before requesting your queue number.</p>{availableMedications.length > 0 && <label className="queue-label">Medication for collection<select value={selectedMedication} onChange={(event) => setSelectedMedication(event.target.value)}>{availableMedications.map((medication) => <option key={medication.name} value={medication.name}>{medication.name}</option>)}</select></label>}<button className="primary-button" disabled={loading || clinic.status === "Closed" || availableMedications.length === 0} onClick={joinQueue}>{loading ? "Requesting..." : clinic.status === "Closed" ? "Clinic currently closed" : availableMedications.length === 0 ? "No medication in stock" : `Get my queue number for ${selectedMedication}`}</button>{message && <p className="queue-error">{message}</p>}</>}</section>;
+  const displayedScheduledAt = ticket?.status === "waiting" ? new Date(clock + peopleAhead * 3 * 60000).toISOString() : ticket?.scheduledAt;
+  const selectedMedicationLabel = selectedMedications.join(", ");
+  const ticketMedicationLabel = ticket?.requestedMedications?.join(", ") || ticket?.requestedMedication;
+  const statusText = ticket?.status === "ready" || ticket?.status === "called" ? ticketMedicationLabel ? `Your ticket is approved. Please proceed to collect ${ticketMedicationLabel} at your scheduled time.` : "Your ticket is approved. Please proceed to the clinic desk at your scheduled time." : ticket?.status === "served" ? ticket?.medicationCollected ? `${ticketMedicationLabel ?? "Medication"} has been handed over.` : "Your visit is complete." : ticket?.status === "missed" ? "This number was missed. Request a new number to join again." : ticket?.status === "left" ? "You left this queue." : "Your number is active. The server will confirm when it is ready.";
+    return <section className="detail-card queue-checkin-card"><div className="section-heading"><div><p className="eyebrow">PATIENT CHECK-IN</p><h2>Request a queue number</h2><p>Each clinic has its own live queue. Your allocated time updates from the people ahead of you.</p></div>{ticket && <StatusPill value={ticket.status === "waiting" ? "Waiting" : ticket.status} />}</div>{ticket ? <><div className="ticket-number">#{displayedQueueNumber}<small>{ticket.status === "left" ? "YOUR ISSUED QUEUE NUMBER" : "YOUR QUEUE NUMBER"}</small></div>{ticketMedicationLabel && <div className="queue-message">Medication: <strong>{ticketMedicationLabel}</strong>{ticket.medicationCollected ? " • Collected" : " • Pending collection"}</div>}<div className="queue-ticket-details"><span><strong>{peopleAhead}</strong> people ahead</span><span><strong>{ticket.estimatedWait}</strong> min estimated wait</span><span><strong>{displayedScheduledAt ? new Date(displayedScheduledAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "-"}</strong> allocated time</span></div><p className="queue-message">{statusText}</p>{ticket.status === "waiting" && <button className="secondary-button" disabled={loading} onClick={leaveQueue}>{loading ? "Updating..." : "Leave queue"}</button>}{["missed", "served", "left"].includes(ticket.status) && <button className="primary-button" disabled={loading || clinic.status === "Closed"} onClick={requestNewTicket}>{clinic.status === "Closed" ? "Clinic closed" : "Request a new number"}</button>}</> : <><div className="queue-ticket-details"><span><strong>{clinic.patients}</strong> patients ahead</span><span><strong>{clinic.patients * getWaitPerPatient(clinic.status)}</strong> min estimated wait</span><span><strong>{clinic.status === "Closed" ? "Closed" : "Next available"}</strong> service</span></div><p>See how many patients are ahead before requesting your queue number.</p>{availableMedications.length > 0 && <fieldset className="queue-label medication-options"><legend>Medications for collection</legend>{availableMedications.map((medication) => <label key={medication.name}><input type="checkbox" checked={selectedMedications.includes(medication.name)} onChange={(event) => setSelectedMedications((current) => event.target.checked ? [...current, medication.name] : current.filter((name) => name !== medication.name))} />{medication.name}</label>)}</fieldset>}<button className="primary-button" disabled={loading || clinic.status === "Closed" || selectedMedications.length === 0} onClick={joinQueue}>{loading ? "Requesting..." : clinic.status === "Closed" ? "Clinic currently closed" : selectedMedications.length === 0 ? "Select medication" : `Get my queue number for ${selectedMedicationLabel}`}</button>{message && <p className="queue-error">{message}</p>}</>}</section>;
 }
 
 function ClinicDetails({ clinic, onBack }: { clinic: Clinic; onBack: () => void }) {
-  return <main className="public-main page-main"><button className="back-button" onClick={onBack}>Back to clinic directory</button><div className="detail-grid"><section><div className="detail-card"><StatusPill value={getQueueLabel(clinic)} /><span>{formatUpdatedAt(clinic.updatedAt)}</span><h1>{clinic.name}</h1><p>Primary community triage and medication dispensing location.</p><hr /><p>Address: {clinic.address}</p><p>Hours: {clinic.hours}</p><p>Phone: {clinic.phone}</p></div><PatientQueue clinic={clinic} /><div className="detail-card chart-card"><h2>Today&apos;s queue activity</h2><p>Historical average wait times compared with the current status.</p><div className="bars"><i style={{ height: "34%" }} /><i style={{ height: "60%" }} /><i style={{ height: "85%" }} /><i className="current" style={{ height: "28%" }} /><i style={{ height: "50%" }} /></div><div className="chart-labels"><span>9 AM</span><span>11 AM</span><span>1 PM</span><span>3 PM</span><span>5 PM</span></div></div></section><section className="detail-card inventory-card"><div className="section-heading"><div><h2>Pharmacy inventory</h2><p>Medication availability currently reported by this clinic.</p></div><span className="live"><span className="dot" /> {formatUpdatedAt(clinic.updatedAt)}</span></div><MedicationTable /></section></div></main>;
+  return <main className="public-main page-main"><button className="back-button" onClick={onBack}>Back to clinic directory</button><div className="detail-grid"><section><div className="detail-card"><StatusPill value={getQueueLabel(clinic)} /><span>{formatUpdatedAt(clinic.updatedAt)}</span><h1>{clinic.name}</h1><p>Primary community triage and medication dispensing location.</p><hr /><p>Address: {clinic.address}</p><p>Hours: {clinic.hours}</p><p>Phone: {clinic.phone}</p></div><PatientQueue clinic={clinic} /></section><section className="detail-card inventory-card"><div className="section-heading"><div><h2>Pharmacy inventory</h2><p>Medication availability currently reported by this clinic.</p></div><span className="live"><span className="dot" /> {formatUpdatedAt(latestMedicationUpdate())}</span></div><MedicationTable /></section></div></main>;
 }
 
 function Auth({ onLogin, onRegister, onPublic, message }: { onLogin: (role: Role, email: string, password: string, token: string) => void; onRegister: (registration: Omit<StaffRegistration, "id">) => void; onPublic: () => void; message: string }) {
@@ -276,6 +290,8 @@ function StaffCrudPanel({ approvedStaff, onUpdateStaff, onDeleteStaff }: { appro
 function MedicationCollectionTickets({ clinicName }: { clinicName: string }) {
   const [tickets, setTickets] = useState<QueueTicket[]>([]);
   const [loading, setLoading] = useState(true);
+  const [actionId, setActionId] = useState("");
+  const [message, setMessage] = useState("");
 
   useEffect(() => {
     let active = true;
@@ -285,7 +301,7 @@ function MedicationCollectionTickets({ clinicName }: { clinicName: string }) {
         const response = await fetch(`${apiUrl}/api/clinics/${encodeURIComponent(clinicName)}/queue-tickets`);
         if (!response.ok) throw new Error("Unable to load medication collection tickets.");
         const data = await response.json() as { tickets?: QueueTicket[] };
-        if (active) setTickets((data.tickets ?? []).filter((ticket) => Boolean(ticket.requestedMedication)));
+        if (active) setTickets((data.tickets ?? []).filter((ticket) => Boolean(ticket.requestedMedications?.length || ticket.requestedMedication) && ["waiting", "ready", "called"].includes(ticket.status)));
       } catch {
         if (active) setTickets([]);
       } finally {
@@ -294,10 +310,27 @@ function MedicationCollectionTickets({ clinicName }: { clinicName: string }) {
     };
 
     load();
-    return () => { active = false; };
+    const timer = window.setInterval(load, 10000);
+    return () => { active = false; window.clearInterval(timer); };
   }, [clinicName]);
 
-  return <section className="portal-panel"><div className="section-heading"><div><h2>Medication collection queue</h2><p>Tickets requesting medication handover for this clinic.</p></div></div>{loading ? <p className="empty">Loading medication collection tickets…</p> : tickets.length === 0 ? <p className="empty">No medication collection tickets are in progress.</p> : <div className="staff-crud-list">{tickets.map((ticket) => <div className="staff-crud-row" key={ticket.id}><span><strong>#{ticket.queueNumber}</strong><small>{ticket.requestedMedication}</small></span><span className="staff-actions"><StatusPill value={ticket.medicationCollected ? "Collected" : ticket.status === "called" ? "Ready to collect" : ticket.status === "served" ? "Served" : "Pending"} /></span></div>)}</div>}</section>;
+  const updateTicket = async (ticket: QueueTicket, action: "approve" | "serve" | "miss") => {
+    setActionId(ticket.id);
+    setMessage("");
+    try {
+      const response = await fetch(`${apiUrl}/api/clinics/${encodeURIComponent(clinicName)}/queue-tickets/${ticket.id}/${action}`, { method: "POST" });
+      const result = await response.json() as QueueTicket & { error?: string };
+      if (!response.ok) throw new Error(result.error || "Ticket update failed.");
+      setTickets((current) => action === "serve" || action === "miss" ? current.filter((item) => item.id !== result.id) : current.map((item) => item.id === result.id ? result : item));
+      setMessage(action === "approve" ? `Ticket #${ticket.queueNumber} approved and removed from waiting.` : action === "serve" ? `Ticket #${ticket.queueNumber} served.` : `Ticket #${ticket.queueNumber} marked as missed.`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Ticket update failed.");
+    } finally {
+      setActionId("");
+    }
+  };
+
+  return <section className="portal-panel"><div className="section-heading"><div><h2>Medication collection queue</h2><p>Approve a waiting ticket, then serve it when its scheduled time arrives.</p></div></div>{message && <p className="queue-message">{message}</p>}{loading ? <p className="empty">Loading medication collection tickets…</p> : tickets.length === 0 ? <p className="empty">No medication collection tickets are in progress.</p> : <div className="staff-crud-list">{tickets.map((ticket) => <div className="staff-crud-row" key={ticket.id}><span><strong>#{ticket.queueNumber}</strong><small>{ticket.requestedMedications?.join(", ") || ticket.requestedMedication}</small></span><span className="staff-actions"><StatusPill value={ticket.medicationCollected ? "Collected" : ticket.status === "ready" || ticket.status === "called" ? "Ready" : ticket.status === "served" ? "Served" : ticket.status === "missed" ? "Missed" : "Waiting"} />{ticket.status === "waiting" && <button className="primary-button" disabled={actionId === ticket.id} onClick={() => updateTicket(ticket, "approve")}>{actionId === ticket.id ? "Updating..." : "Approve"}</button>}{(ticket.status === "ready" || ticket.status === "called") && <button className="primary-button" disabled={actionId === ticket.id} onClick={() => updateTicket(ticket, "serve")}>{actionId === ticket.id ? "Updating..." : "Serve"}</button>}</span></div>)}</div>}</section>;
 }
 
 function StaffOperationsPanel({ clinicData, enrolledClinic, onUpdateClinic }: { clinicData: Clinic[]; enrolledClinic: string; onUpdateClinic: (name: string, update: ClinicControlUpdate) => void | Promise<void> }) {
@@ -510,6 +543,6 @@ export default function Home() {
   if (role === "admin" && view !== "login" && view !== "home") return <><AdminHeader view={view} onNavigate={setView} onLogout={logout} />{view === "adminDashboard" && <AdminDashboard clinicData={clinicData} medicationData={medicationData} systemSummary={systemSummary} />}{view === "adminClinics" && <AdminClinics clinicData={clinicData} />}{view === "adminStaff" && <AdminStaff approvedStaff={approvedStaff} pendingStaff={pendingStaff} onApprove={approveStaff} onReject={rejectStaff} />}{view === "adminMedications" && <AdminMedications medicationData={medicationData} onCreateMedication={createMedication} />}</>;
   if (role === "staff" && ["staffQueue", "staffOverview", "staffStock", "portal"].includes(view)) return <><StaffHeader view={view} onNavigate={setView} onLogout={logout} staffName={staffName} enrolledClinic={enrolledClinic} />{view === "staffQueue" && <StaffOperationsPanel clinicData={clinicData} enrolledClinic={enrolledClinic} onUpdateClinic={updateClinic} />}{view === "staffOverview" && <StaffClinicOverview clinicData={clinicData} medicationData={medicationData} enrolledClinic={enrolledClinic} />}{view === "staffStock" && <StaffStockpileController medicationData={medicationData} enrolledClinic={enrolledClinic} onUpdateMedication={updateMedication} />}{view === "portal" && <Portal role={role} clinicData={clinicData} medicationData={medicationData} enrolledClinic={enrolledClinic} pendingStaff={pendingStaff} approvedStaff={approvedStaff} onApprove={approveStaff} onReject={rejectStaff} onCreateStaff={createStaff} onUpdateStaff={updateStaff} onDeleteStaff={deleteStaff} onUpdateClinic={updateClinic} onUpdateMedication={updateMedication} systemSummary={systemSummary} onLogout={logout} />}</>;
   if (view === "login") return <><AlertBar admin /><Auth message={authMessage} onRegister={registerStaff} onLogin={login} onPublic={() => navigate("home")} /></>;
-  return <div className="app-shell"><PublicHeader view={view} onNavigate={navigate} />{view === "home" && <PublicHome onNavigate={navigate} onClinic={(clinic) => { setSelectedClinic(clinic); setView("clinic"); }} />}{view === "clinics" && <Clinics onClinic={(clinic) => { setSelectedClinic(clinic); setView("clinic"); }} />}{view === "medications" && <Medications />}{view === "clinic" && selectedClinic && <ClinicDetails clinic={selectedClinic} onBack={() => navigate("clinics")} />}<Footer /><button className="floating-login" onClick={() => navigate("login")}>Staff & admin access</button></div>;
+  return <div className="app-shell"><PublicHeader view={view} onNavigate={navigate} />{view === "home" && <PublicHome onNavigate={navigate} onClinic={(clinic) => { setSelectedClinic(clinic); setView("clinic"); }} />}{view === "clinics" && <Clinics onClinic={(clinic) => { setSelectedClinic(clinic); setView("clinic"); }} />}{view === "medications" && <Medications />}{view === "clinic" && selectedClinic && <ClinicDetails clinic={selectedClinic} onBack={() => navigate("clinics")} />}<Footer /></div>;
 }
 
