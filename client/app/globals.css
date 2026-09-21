@@ -335,3 +335,26 @@ footer { padding-left: 3.2%; padding-right: 3.2%; }
 @media (max-width: 560px) { .admin-page-title { align-items: start; flex-direction: column; }.admin-stats, .admin-columns { grid-template-columns: 1fr; }.admin-page { padding: 28px 15px 50px; }.queue-dashboard { padding: 28px 15px 50px; }.queue-card { padding: 18px; }.queue-label-row { align-items: start; flex-direction: column; gap: 0; }.stepper span { flex-basis: 100%; margin-top: 5px; } }
 @media (max-width: 850px) { .staff-overview-grid, .stockpile-grid { grid-template-columns: 1fr; }.staff-page-title { align-items: start; flex-direction: column; }.staff-page-title > span { white-space: normal; }.staff-stat-grid { grid-template-columns: 1fr 1fr; } }
 @media (max-width: 560px) { .staff-page { padding: 28px 15px 50px; }.staff-stat-grid { grid-template-columns: 1fr; }.stockpile-head, .stockpile-row { min-width: 520px; }.stockpile-table { overflow-x: auto; } }
+
+/* Readable default scale for public and staff workflows. */
+body { font-size: 20px; }
+.brand strong { font-size: 17px; }
+.brand small { font-size: 11px; }
+nav button, .header-status, .header-access { font-size: 15px; }
+.eyebrow { font-size: 11px; }
+.hero > p:not(.eyebrow), .section-heading p, .page-title > div > p:last-child { font-size: 15px; }
+.search-bar input, .search-bar select, select, .medication-search-select { font-size: 15px; }
+.search-bar button, .primary-button, .med-search > button { font-size: 15px; }
+.section-heading h2, .page-title h1 { font-size: 22px; }
+.text-button, .back-button, .result-count { font-size: 15px; }
+.card-top, .clinic-card p, .directory-card p, .card-meta, table, .filter-row input { font-size: 14px; }
+.pill { font-size: 13px; }
+th { font-size: 14px; }
+td { font-size: 15px; }
+.wait { font-size: 23px; }
+.wait small { font-size: 10px; }
+.queue-label, .medication-options legend { font-size: 14px; }
+.medication-options label, .queue-message { font-size: 15px; }
+.queue-ticket-details span { font-size: 14px; }
+.ticket-number small { font-size: 11px; }
+.queue-error { font-size: 14px; }
