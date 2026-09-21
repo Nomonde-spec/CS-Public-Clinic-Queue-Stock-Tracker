@@ -7,7 +7,7 @@
     "dev": "node --env-file=.env --watch index.js",
     "build": "npm install --prefix ../client && npm run build --prefix ../client",
     "start": "node --env-file=.env index.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "node --test validation.test.js"
   },
   "keywords": [],
   "type": "commonjs",
