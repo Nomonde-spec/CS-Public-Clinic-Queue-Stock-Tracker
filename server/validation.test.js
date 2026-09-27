@@ -3,6 +3,54 @@ const assert = require('node:assert/strict');
 const { getAvailability, parseStockCount, isAllowedClinicStatus } = require('./validation');
 const { allocateTicket, callTicket, canServeTicket, deriveQueue, expireTickets, getQueueSlotMinutes, getQueueStatus, markMedicationCollected, publicTicket } = require('./queue');
 const { canAcceptQueueTickets, getClinicOpenState, getEffectiveClinicStatus, parseClinicHours } = require('./hours');
+const { addDemoClinicStockRows, attachClinicStock, isDemoStockDataEnabled, parseLegacyClinicStock } = require('./clinic-stock');
+
+test('legacy clinic stock is migrated only when its clinic attribution is explicit', () => {
+  assert.equal(parseLegacyClinicStock('Metro Family Care Centre: 50 in stock', 'Metro Family Care Centre'), 50);
+  assert.equal(parseLegacyClinicStock('50 units in stock', 'Metro Family Care Centre'), null);
+  assert.equal(parseLegacyClinicStock('All clinics', 'Metro Family Care Centre'), null);
+  assert.equal(parseLegacyClinicStock('Other Clinic: 50 in stock', 'Metro Family Care Centre'), null);
+});
+
+test('Paracetamol search data lists every positive clinic quantity with its derived status', () => {
+  const [medication] = attachClinicStock([{ name: 'Paracetamol 500mg Tablets', availability: 'In Stock' }], [
+    { name: 'Paracetamol 500mg Tablets', clinicName: 'Clinic Zero', province: 'Gauteng', address: 'A street', stockCount: 0 },
+    { name: 'Paracetamol 500mg Tablets', clinicName: 'Clinic One', province: 'Limpopo', address: 'B street', stockCount: 1 },
+    { name: 'Paracetamol 500mg Tablets', clinicName: 'Clinic Low', province: 'North West', address: 'C street', stockCount: 249 },
+    { name: 'Paracetamol 500mg Tablets', clinicName: 'Clinic In Stock', province: 'Western Cape', address: 'D street', stockCount: 250 },
+  ]);
+
+  assert.deepEqual(medication.availableAt.map(({ clinicName, stockCount, availability }) => ({ clinicName, stockCount, availability })), [
+    { clinicName: 'Clinic One', stockCount: 1, availability: 'Low Stock' },
+    { clinicName: 'Clinic Low', stockCount: 249, availability: 'Low Stock' },
+    { clinicName: 'Clinic In Stock', stockCount: 250, availability: 'In Stock' },
+  ]);
+});
+
+test('demo stock fills missing clinic-medication pairs without replacing reported stock', () => {
+  const rows = addDemoClinicStockRows(
+    [
+      { name: 'Clinic A', province: 'Gauteng', address: 'A street' },
+      { name: 'Clinic B', province: 'Limpopo', address: 'B street' },
+    ],
+    [{ name: 'Paracetamol' }, { name: 'Metformin' }],
+    [{ name: 'Paracetamol', clinicName: 'Clinic A', province: 'Gauteng', address: 'A street', stockCount: 0 }],
+  );
+
+  assert.equal(rows.length, 4);
+  assert.equal(rows.find((row) => row.clinicName === 'Clinic A' && row.name === 'Paracetamol').stockCount, 0);
+  const generatedStatuses = rows
+    .filter((row) => !(row.clinicName === 'Clinic A' && row.name === 'Paracetamol'))
+    .map((row) => attachClinicStock([{ name: row.name }], [row])[0].clinicStocks[0].availability);
+  assert.ok(generatedStatuses.includes('Low Stock'));
+  assert.ok(generatedStatuses.includes('In Stock'));
+});
+
+test('demo stock data is opt-in and disabled in production', () => {
+  assert.equal(isDemoStockDataEnabled({ DEMO_STOCK_DATA: 'true', NODE_ENV: 'development' }), true);
+  assert.equal(isDemoStockDataEnabled({ DEMO_STOCK_DATA: 'true', NODE_ENV: 'production' }), false);
+  assert.equal(isDemoStockDataEnabled({ NODE_ENV: 'development' }), false);
+});
 
 test('clinic hours parse supported schedule formats', () => {
   assert.deepEqual(parseClinicHours('Mon - Fri: 8:00 AM - 6:00 PM'), { days: new Set(['Mon', 'Tue', 'Wed', 'Thu', 'Fri']), opens: 480, closes: 1080 });
@@ -166,6 +214,22 @@ test('one ticket can collect multiple medications exactly once', () => {
   assert.equal(medicationList[1].stockCount, 1);
   assert.deepEqual(publicTicket(ticket, [ticket]).requestedMedications, ['Paracetamol 500mg Tablets', 'Metformin 850mg Tablets']);
   assert.equal(markMedicationCollected(ticket, medicationList, now), false);
+});
+
+test('active queue counts exclude ready tickets and include only waiting plus called patients', () => {
+  const now = new Date('2026-09-19T08:00:00.000Z');
+  const first = allocateTicket([], 'Clinic A', now);
+  const second = allocateTicket([first], 'Clinic A', now);
+  const third = allocateTicket([first, second], 'Clinic A', now);
+
+  first.status = 'ready';
+  second.status = 'called';
+  third.status = 'waiting';
+
+  const summary = deriveQueue([first, second, third], now, 'Open');
+  assert.equal(summary.patients, 2);
+  assert.equal(summary.wait, 6);
+  assert.deepEqual(summary.active.map((ticket) => ticket.status), ['called', 'waiting']);
 });
 
 test('called tickets expire and cannot be called twice', () => {

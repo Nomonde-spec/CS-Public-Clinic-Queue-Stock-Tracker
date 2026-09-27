@@ -41,12 +41,13 @@ function normalizeRequestedMedications(value) {
 
 function deriveQueue(tickets, now = new Date(), clinicStatus = "Open") {
 	const current = new Date(now);
-	const active = tickets.filter((ticket) => ["waiting", "ready", "called"].includes(ticket.status));
+	const active = tickets.filter((ticket) => ["waiting", "called"].includes(ticket.status));
 	const waiting = active.filter((ticket) => ticket.status === "waiting").sort((a, b) => a.queueNumber - b.queueNumber);
-	const called = active.filter((ticket) => ["ready", "called"].includes(ticket.status)).sort((a, b) => a.queueNumber - b.queueNumber);
-	const status = clinicStatus === "Closed" ? "Closed" : getQueueStatus(waiting.length);
+	const called = tickets.filter((ticket) => ticket.status === "called").sort((a, b) => a.queueNumber - b.queueNumber);
+	const activePatients = waiting.length + called.length;
+	const status = clinicStatus === "Closed" ? "Closed" : getQueueStatus(activePatients);
 	const slotMinutes = getQueueSlotMinutes(status);
-	return { patients: waiting.length, wait: waiting.length * slotMinutes, status, nextQueueNumber: Math.max(0, ...tickets.map((ticket) => ticket.queueNumber || 0)) + 1, current: called[0] || waiting[0] || null, waiting, active, updatedAt: current.toISOString() };
+	return { patients: activePatients, wait: activePatients * slotMinutes, status, nextQueueNumber: Math.max(0, ...tickets.map((ticket) => ticket.queueNumber || 0)) + 1, current: called[0] || waiting[0] || null, waiting, called, active, updatedAt: current.toISOString() };
 }
 
 function allocateTicket(tickets, clinicName, now = new Date(), clinicStatus = "Open") {
