@@ -2,6 +2,7 @@ const http = require("node:http");
 const { Pool } = require("pg");
 const { getAvailability, parseStockCount, isAllowedClinicStatus } = require("./validation");
 const { allocateTicket, callTicket, canServeTicket, deriveQueue, expireTickets, markMedicationCollected, normalizeRequestedMedications, publicTicket, queueDate } = require("./queue");
+const { canAcceptQueueTickets, getEffectiveClinicStatus } = require("./hours");
 
 const port = Number(process.env.PORT) || 3000;
 const defaultClinics = [
@@ -45,6 +46,8 @@ function createMemoryDb() {
 		province: clinic.province,
 		district: clinic.district,
 		address: clinic.address,
+		latitude: clinic.latitude ?? null,
+		longitude: clinic.longitude ?? null,
 		hours: clinic.hours,
 		phone: clinic.phone,
 		wait: clinic.wait,
@@ -90,7 +93,7 @@ function createMemoryDb() {
 			if (text.startsWith("SELECT COUNT(*)::int AS total FROM clinics")) return { rows: [{ total: clinics.length }] };
 			if (text.startsWith("SELECT COUNT(*)::int AS total FROM staff WHERE role = 'staff' AND status = 'approved'")) return { rows: [{ total: staff.filter((member) => member.role === "staff" && member.status === "approved").length }] };
 			if (text.startsWith("SELECT COUNT(*)::int AS total FROM staff WHERE role = 'staff' AND status = 'pending'")) return { rows: [{ total: staff.filter((member) => member.role === "staff" && member.status === "pending").length }] };
-			if (text.includes("SELECT name, province, district, address, hours, phone, wait, patients, stock, status, updated_at AS \"updatedAt\" FROM clinics")) {
+			if (text.includes("SELECT name, province, district, address, latitude, longitude, hours, phone, wait, patients, stock, status, updated_at AS \"updatedAt\" FROM clinics")) {
 				return { rows: clinics.map(rowForClinic) };
 			}
 			if (text.includes("SELECT name, category, availability, clinics, stock_count AS \"stockCount\"")) {
@@ -98,7 +101,7 @@ function createMemoryDb() {
 			}
 			if (text.startsWith("INSERT INTO clinics")) {
 				const [name, province, district, address, hours, phone] = args;
-				const clinic = { id: clinics.length + 1, name, province, district, address, hours, phone, wait: null, patients: 0, stock: 0, status: "Open", updatedAt: new Date().toISOString() };
+				const clinic = { id: clinics.length + 1, name, province, district, address, latitude: null, longitude: null, hours, phone, wait: null, patients: 0, stock: 0, status: "Open", updatedAt: new Date().toISOString() };
 				clinics.push(clinic);
 				return { rows: [rowForClinic(clinic)] };
 			}
@@ -114,9 +117,9 @@ function createMemoryDb() {
 				const clinic = clinics.find((item) => item.name === args[0]);
 				return { rows: clinic ? [{ id: clinic.id }] : [] };
 			}
-			if (text.startsWith("SELECT id, name, status FROM clinics WHERE name = $1")) {
+			if (text.startsWith("SELECT id, name, status, hours FROM clinics WHERE name = $1")) {
 				const clinic = clinics.find((item) => item.name === args[0]);
-				return { rows: clinic ? [{ id: clinic.id, name: clinic.name, status: clinic.status }] : [] };
+				return { rows: clinic ? [{ id: clinic.id, name: clinic.name, status: clinic.status, hours: clinic.hours }] : [] };
 			}
 			if (text.startsWith("INSERT INTO medications")) {
 				const [name, category, availability, clinicsValue, stockCount] = args;
@@ -246,9 +249,9 @@ async function createQueueTicket(clinicName, medicationName = null) {
 		if (Number(medicationResult.rows[0].stockCount) <= 0) return { error: `${requestedMedication} is currently out of stock.`, status: 409 };
 	}
 	if (!process.env.DATABASE_URL) {
-		const clinic = (await pool.query("SELECT id, name, status FROM clinics WHERE name = $1", [clinicName])).rows[0];
+		const clinic = (await pool.query("SELECT id, name, status, hours FROM clinics WHERE name = $1", [clinicName])).rows[0];
 		if (!clinic) return { error: "Clinic not found.", status: 404 };
-		if (clinic.status === "Closed") return { error: "This clinic is currently closed.", status: 409 };
+		if (!canAcceptQueueTickets(clinic.hours, clinic.status)) return { error: "This clinic is currently closed.", status: 409 };
 		expireTickets(memoryQueueTickets);
 		const ticket = allocateTicket(memoryQueueTickets, clinicName, new Date(), clinic.status);
 		ticket.requestedMedications = requestedMedications;
@@ -261,13 +264,13 @@ async function createQueueTicket(clinicName, medicationName = null) {
 	const client = await pool.connect();
 	try {
 		await client.query("BEGIN");
-		const clinicResult = await client.query("SELECT id, name, status FROM clinics WHERE name = $1 FOR UPDATE", [clinicName]);
+		const clinicResult = await client.query("SELECT id, name, status, hours FROM clinics WHERE name = $1 FOR UPDATE", [clinicName]);
 		const clinic = clinicResult.rows[0];
 		if (!clinic) {
 			await client.query("ROLLBACK");
 			return { error: "Clinic not found.", status: 404 };
 		}
-		if (clinic.status === "Closed") {
+		if (!canAcceptQueueTickets(clinic.hours, clinic.status)) {
 			await client.query("ROLLBACK");
 			return { error: "This clinic is currently closed.", status: 409 };
 		}
@@ -436,6 +439,8 @@ async function ensureDatabase() {
 			province VARCHAR(100) NOT NULL DEFAULT 'Gauteng',
 			district VARCHAR(255),
 			address VARCHAR(255),
+			latitude DOUBLE PRECISION,
+			longitude DOUBLE PRECISION,
 			hours VARCHAR(255),
 			phone VARCHAR(255),
 			wait INTEGER,
@@ -462,6 +467,8 @@ async function ensureDatabase() {
 	await pool.query(`ALTER TABLE medications ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()`);
 	await pool.query(`ALTER TABLE clinics ADD COLUMN IF NOT EXISTS wait INTEGER`);
 	await pool.query(`ALTER TABLE clinics ADD COLUMN IF NOT EXISTS province VARCHAR(100) NOT NULL DEFAULT 'Gauteng'`);
+	await pool.query(`ALTER TABLE clinics ADD COLUMN IF NOT EXISTS latitude DOUBLE PRECISION`);
+	await pool.query(`ALTER TABLE clinics ADD COLUMN IF NOT EXISTS longitude DOUBLE PRECISION`);
 	await pool.query(`ALTER TABLE clinics ADD COLUMN IF NOT EXISTS patients INTEGER NOT NULL DEFAULT 0`);
 	await pool.query(`ALTER TABLE clinics ADD COLUMN IF NOT EXISTS stock INTEGER NOT NULL DEFAULT 0`);
 	await pool.query(`ALTER TABLE clinics ADD COLUMN IF NOT EXISTS status VARCHAR(20) NOT NULL DEFAULT 'Open'`);
@@ -599,12 +606,14 @@ async function handleRequest(request, response) {
 
 		if (request.method === "GET" && request.url === "/api/public-data") {
 			const [clinicResult, medicationResult] = await Promise.all([
-				pool.query("SELECT name, province, district, address, hours, phone, wait, patients, stock, status, updated_at AS \"updatedAt\" FROM clinics ORDER BY id"),
+				pool.query("SELECT name, province, district, address, latitude, longitude, hours, phone, wait, patients, stock, status, updated_at AS \"updatedAt\" FROM clinics ORDER BY id"),
 				pool.query("SELECT name, category, availability, clinics, stock_count AS \"stockCount\", updated_at AS \"updatedAt\" FROM medications ORDER BY id"),
 			]);
 			const clinicsWithQueue = await Promise.all(clinicResult.rows.map(async (clinic) => {
 				const queue = await getClinicQueue(clinic.name);
-				return { ...clinic, status: queue?.summary.status ?? "Open - Low Wait", patients: queue?.summary.patients ?? 0, wait: queue?.summary.wait ?? 0, nextQueueNumber: queue?.summary.nextQueueNumber ?? 1, queueUpdatedAt: queue?.summary.updatedAt ?? new Date().toISOString() };
+				const queueStatus = queue?.summary.status ?? "Open - Low Wait";
+				const status = getEffectiveClinicStatus(clinic.hours, queueStatus);
+				return { ...clinic, status, patients: queue?.summary.patients ?? 0, wait: queue?.summary.wait ?? 0, nextQueueNumber: queue?.summary.nextQueueNumber ?? 1, queueUpdatedAt: queue?.summary.updatedAt ?? new Date().toISOString() };
 			}));
 			return send(response, 200, { clinics: clinicsWithQueue, medications: medicationResult.rows });
 		}

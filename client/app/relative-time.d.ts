@@ -1,0 +1,1 @@
+export function formatRelativeUpdate(elapsedMinutes: number): string;

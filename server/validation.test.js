@@ -2,6 +2,37 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { getAvailability, parseStockCount, isAllowedClinicStatus } = require('./validation');
 const { allocateTicket, callTicket, canServeTicket, deriveQueue, expireTickets, getQueueSlotMinutes, getQueueStatus, markMedicationCollected, publicTicket } = require('./queue');
+const { canAcceptQueueTickets, getClinicOpenState, getEffectiveClinicStatus, parseClinicHours } = require('./hours');
+
+test('clinic hours parse supported schedule formats', () => {
+  assert.deepEqual(parseClinicHours('Mon - Fri: 8:00 AM - 6:00 PM'), { days: new Set(['Mon', 'Tue', 'Wed', 'Thu', 'Fri']), opens: 480, closes: 1080 });
+  assert.deepEqual(parseClinicHours('08:00 - 17:00'), { days: null, opens: 480, closes: 1020 });
+  assert.equal(getClinicOpenState('Open 24 Hours', new Date('2026-09-27T12:00:00.000Z')), true);
+  assert.equal(getClinicOpenState('hours not recognized', new Date('2026-09-27T12:00:00.000Z')), null);
+});
+
+test('weekday clinics close outside the schedule using South African local time', () => {
+  const hours = 'Mon - Fri: 8:00 AM - 6:00 PM';
+  assert.equal(getClinicOpenState(hours, new Date('2026-09-28T05:59:00.000Z')), false);
+  assert.equal(getClinicOpenState(hours, new Date('2026-09-28T06:00:00.000Z')), true);
+  assert.equal(getClinicOpenState(hours, new Date('2026-09-28T15:59:00.000Z')), true);
+  assert.equal(getClinicOpenState(hours, new Date('2026-09-28T16:00:00.000Z')), false);
+  assert.equal(getClinicOpenState(hours, new Date('2026-09-27T08:00:00.000Z')), false);
+});
+
+test('public status and queue acceptance follow schedule without overriding manual closure', () => {
+  const weekdayHours = 'Mon - Fri: 8:00 AM - 6:00 PM';
+  const beforeOpening = new Date('2026-09-28T05:59:00.000Z');
+  const duringHours = new Date('2026-09-28T06:00:00.000Z');
+
+  assert.equal(getEffectiveClinicStatus(weekdayHours, 'Open - Low Wait', beforeOpening), 'Closed');
+  assert.equal(getEffectiveClinicStatus(weekdayHours, 'Open - Low Wait', duringHours), 'Open - Low Wait');
+  assert.equal(getEffectiveClinicStatus(weekdayHours, 'Closed', duringHours), 'Closed');
+  assert.equal(canAcceptQueueTickets(weekdayHours, 'Open', beforeOpening), false);
+  assert.equal(canAcceptQueueTickets(weekdayHours, 'Open', duringHours), true);
+  assert.equal(canAcceptQueueTickets('unsupported hours', 'Open', beforeOpening), true);
+  assert.equal(canAcceptQueueTickets(weekdayHours, 'Closed', duringHours), false);
+});
 
 test('stock thresholds match the contract', () => {
   assert.equal(getAvailability(0), 'Out of Stock');

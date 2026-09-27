@@ -11,7 +11,7 @@ button { cursor: pointer; }
 .alert-icon { display: inline-flex; justify-content: center; align-items: center; width: 12px; height: 12px; border: 2px solid currentColor; border-radius: 50%; font-size: 8px; }
 .site-header { height: 67px; display: flex; align-items: center; gap: 7%; padding: 0 4.5%; background: var(--surface); border-bottom: 1px solid var(--line); }
 .brand { display: flex; align-items: center; gap: 10px; min-width: 245px; color: var(--teal-dark); }
-.brand-mark { display: grid; place-items: center; width: 28px; height: 28px; border-radius: 7px; color: white; background: var(--teal); font-size: 22px; font-weight: 700; }
+.brand-logo { display: block; width: 48px; height: 48px; object-fit: contain; flex-shrink: 0; background: transparent; filter: drop-shadow(0 1px 3px rgba(17, 103, 98, 0.1)); }
 .brand strong { display: block; font-size: 15px; line-height: 1; }
 .brand small { display: block; margin-top: 3px; color: #91a2b6; font-size: 9px; letter-spacing: .04em; }
 nav { display: flex; align-self: stretch; gap: 30px; }
@@ -38,6 +38,10 @@ h1 { margin-bottom: 9px; font-size: clamp(28px, 4vw, 45px); line-height: 1.1; le
 .section-heading p, .page-title > div > p:last-child { margin: 0; color: var(--muted); font-size: 11px; }
 .section-heading > span { color: #94a1b3; font-size: 11px; }
 .text-button, .back-button { border: 0; color: var(--teal-dark); background: none; font-size: 11px; font-weight: 700; }
+.previous-button { flex: 0 0 auto; padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; color: var(--teal-dark); background: white; font-size: 11px; font-weight: 700; }
+.previous-button:disabled { color: #9baabd; background: #f7fafb; cursor: not-allowed; }
+.auth-page-shell { position: relative; min-height: 100vh; }
+.auth-page-shell > .previous-button { position: absolute; z-index: 1; top: 14px; left: 18px; }
 .section-heading, .clinic-cards, .stock-section { max-width: 1120px; margin-left: auto; margin-right: auto; }
 .section-heading { margin-top: 34px; margin-bottom: 17px; }
 .clinic-cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
@@ -57,6 +61,10 @@ h1 { margin-bottom: 9px; font-size: clamp(28px, 4vw, 45px); line-height: 1.1; le
 .wait small { display: block; margin-top: 3px; color: #9baabd; font-size: 8px; letter-spacing: .04em; }
 .stock-section { margin-top: 33px; padding: 1px 0 28px; }
 .table-wrap { overflow: auto; border: 1px solid var(--line); border-radius: 8px; background: white; }
+.medication-summary { margin: 0; padding: 0; list-style: none; border: 1px solid var(--line); border-radius: 8px; background: white; }
+.medication-summary li { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 52px; padding: 10px 13px; border-bottom: 1px solid var(--line); }
+.medication-summary li:last-child { border-bottom: 0; }
+.medication-summary li strong { min-width: 0; color: var(--ink); font-size: 11px; }
 table { width: 100%; border-collapse: collapse; text-align: left; font-size: 11px; }
 th { padding: 12px 13px; color: #66768d; background: #f7fafb; font-size: 10px; }
 td { padding: 13px; border-top: 1px solid var(--line); color: #586a82; }
@@ -66,6 +74,7 @@ td strong { color: var(--ink); }
 .page-title h1 { font-size: 29px; }
 .result-count { color: var(--teal-dark); font-size: 12px; font-weight: 700; }
 .filter-row { display: flex; align-items: center; gap: 10px; margin-bottom: 22px; padding: 10px; border: 1px solid var(--line); border-radius: 8px; background: white; }
+.location-message { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: -10px 0 18px; color: var(--muted); font-size: 12px; }
 .filter-row label { display: flex; align-items: center; gap: 7px; flex: 1; padding: 0 8px; color: var(--teal); }
 .filter-row input { width: 100%; border: 0; outline: 0; font-size: 11px; }
 select { min-width: 160px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 5px; color: var(--muted); background: white; font-size: 11px; }
@@ -75,6 +84,7 @@ select { min-width: 160px; padding: 10px 12px; border: 1px solid var(--line); bo
 .directory-card .card-meta { gap: 9px; }
 .directory-card h3 { font-size: 12px; }
 .directory-card p { margin-bottom: 10px; }
+.directory-card > div > small { display: block; margin: -5px 0 10px; color: var(--muted); font-size: 10px; }
 .map-placeholder { min-height: 500px; position: relative; overflow: hidden; border-radius: 10px; background: #c9e5ed; }
 .map-grid { position: absolute; inset: -20%; background: repeating-linear-gradient(28deg, transparent 0 70px, #f2f8f6 72px 75px), repeating-linear-gradient(115deg, transparent 0 115px, #a9d6df 117px 120px); opacity: .8; transform: rotate(-9deg); }
 .map-pin { position: absolute; display: grid; place-items: center; width: 34px; height: 34px; border: 4px solid white; border-radius: 50%; color: white; background: #4bb94d; font-size: 21px; box-shadow: 0 2px 7px #28586b55; }
@@ -145,7 +155,7 @@ body { background: var(--wash); color: var(--ink); font-family: var(--font-geist
 .admin-alert { background: #fff0f0; color: #bb2929; }
 .site-header { height: 68px; padding: 0 3.2%; gap: 7%; background: #fff; }
 .brand { min-width: 250px; color: var(--teal-dark); }
-.brand-mark { width: 28px; height: 28px; border-radius: 6px; background: var(--teal); }
+.brand-mark { display: none; }
 nav { gap: 28px; }
 nav button { font-size: 11px; }
 .header-access, .sign-out { border-radius: 5px; }
@@ -348,6 +358,18 @@ nav button, .header-status, .header-access { font-size: 15px; }
 .section-heading h2, .page-title h1 { font-size: 22px; }
 .text-button, .back-button, .result-count { font-size: 15px; }
 .card-top, .clinic-card p, .directory-card p, .card-meta, table, .filter-row input { font-size: 14px; }
+.site-header, .admin-header { height: 68px; min-height: 68px; gap: 5%; padding-top: 0; padding-bottom: 0; }
+.page-previous-wrap { width: 100%; padding: 10px max(20px, calc((100% - 1120px) / 2)); background: var(--wash); }
+.auth-main { position: relative; }
+.auth-main .auth-copy > .previous-button { position: absolute; top: 14px; left: 3.2%; margin: 0; }
+@media (max-width: 850px) {
+	.site-header, .admin-header { gap: 15px; }
+}
+@media (max-width: 560px) {
+	.site-header, .admin-header { min-height: 62px; }
+	.page-previous-wrap { padding: 8px 15px; }
+	.auth-main .auth-copy > .previous-button { top: 10px; left: 20px; }
+}
 .pill { font-size: 13px; }
 th { font-size: 14px; }
 td { font-size: 15px; }
