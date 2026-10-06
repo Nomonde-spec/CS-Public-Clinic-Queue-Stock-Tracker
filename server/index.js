@@ -1,9 +1,9 @@
+const { allocateTicket, callTicket, canServeTicket, deriveQueue, expireTickets, hasActiveQueueTicket, publicTicket, queueDate } = require("./queue");
 const http = require("node:http");
 const { Pool } = require("pg");
-const { getAvailability, parseStockCount, isAllowedClinicStatus } = require("./validation");
-const { allocateTicket, callTicket, canServeTicket, deriveQueue, expireTickets, markMedicationCollected, normalizeRequestedMedications, publicTicket, queueDate } = require("./queue");
-const { canAcceptQueueTickets, getEffectiveClinicStatus } = require("./hours");
-const { addDemoClinicStockRows, attachClinicStock, isDemoStockDataEnabled, parseLegacyClinicStock } = require("./clinic-stock");
+const { getAvailability, parseStockCount, calculateStockMovement, isAllowedClinicStatus } = require("./validation");
+const { hashPassword, verifyPassword, createResetToken, hashResetToken, isValidPassword } = require("./password");
+const { defaultMedications, createClinicInventory, setClinicMedicationStock } = require("./medication-catalog");
 
 const port = Number(process.env.PORT) || 3000;
 const defaultClinics = [
@@ -17,28 +17,22 @@ const defaultClinics = [
 	{ id: 8, name: "Karoo Wellness Clinic", province: "Northern Cape", district: "Karoo District", address: "7 Kalahari Avenue", hours: "08:00 - 17:00", phone: "053 555 0108", wait: 27, patients: 11, stock: 81, status: "Open", updatedAt: new Date().toISOString() },
 	{ id: 9, name: "Mthatha Public Health Node", province: "North West", district: "Mafikeng District", address: "31 Heritage Road", hours: "08:00 - 17:00", phone: "018 555 0109", wait: 65, patients: 31, stock: 68, status: "Open", updatedAt: new Date().toISOString() },
 ];
-const defaultMedications = [
-	{ id: 1, name: "Amoxicillin 500mg Capsules", category: "Antibiotic", availability: "Low Stock", clinics: "50 units in stock", stockCount: 50 },
-	{ id: 2, name: "Albuterol 90mcg Inhaler", category: "Respiratory", availability: "In Stock", clinics: "250 units in stock", stockCount: 250 },
-	{ id: 3, name: "Metformin 850mg Tablets", category: "Antidiabetic", availability: "In Stock", clinics: "250 units in stock", stockCount: 250 },
-	{ id: 4, name: "Paracetamol 500mg Tablets", category: "Pain & Fever", availability: "In Stock", clinics: "250 units in stock", stockCount: 250 },
-	{ id: 5, name: "Atorvastatin 20mg Tablets", category: "Cardiovascular", availability: "Out of Stock", clinics: "0 units in stock", stockCount: 0 },
-	{ id: 6, name: "Lisinopril 10mg Tablets", category: "Cardiovascular", availability: "Low Stock", clinics: "50 units in stock", stockCount: 50 },
-];
 const memoryQueueTickets = [];
 
 const allowedOrigins = (process.env.CLIENT_ORIGINS || process.env.CLIENT_ORIGIN || "http://localhost:3000")
 	.split(",")
 	.map((origin) => origin.trim())
 	.filter(Boolean);
+const isValidEmail = (email) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
 
 function createMemoryDb() {
 	const clinics = defaultClinics.map((clinic) => ({ ...clinic }));
 	const medications = defaultMedications.map((medication) => ({ ...medication }));
-	const clinicMedicationStocks = [];
+	const clinicMedications = createClinicInventory(clinics, medications);
+	const resetTokens = new Map();
 	const staff = [
-		{ id: "admin-seed", name: "System Administrator", email: "sys.admin@carequeue.gov", role: "admin", status: "approved", clinic: "All clinics", clinic_id: null, password_hash: "managed-by-portal" },
-		{ id: "staff-seed", name: "Dr. Sarah Jenkins", email: "s.jenkins@metrocare.gov", role: "staff", status: "approved", clinic: "Metro Family Care Centre", clinic_id: 1, password_hash: "managed-by-portal" },
+		...(process.env.ADMIN_EMAIL && process.env.ADMIN_PASSWORD ? [{ id: "admin-seed", name: "System Administrator", email: process.env.ADMIN_EMAIL.toLowerCase(), role: "admin", status: "approved", clinic: "All clinics", clinic_id: null, password_hash: hashPassword(process.env.ADMIN_PASSWORD) }] : []),
+		{ id: "staff-seed", name: "Dr. Sarah Jenkins", email: "s.jenkins@metrocare.gov", role: "staff", status: "approved", clinic: "Metro Family Care Centre", clinic_id: 1, password_hash: hashPassword(createResetToken()) },
 	];
 
 	const cleanStatus = (status) => status || "Open";
@@ -48,8 +42,6 @@ function createMemoryDb() {
 		province: clinic.province,
 		district: clinic.district,
 		address: clinic.address,
-		latitude: clinic.latitude ?? null,
-		longitude: clinic.longitude ?? null,
 		hours: clinic.hours,
 		phone: clinic.phone,
 		wait: clinic.wait,
@@ -67,7 +59,7 @@ function createMemoryDb() {
 		clinics: medication.clinics,
 		stock_count: medication.stockCount,
 		"stockCount": medication.stockCount,
-		unassigned_stock_count: medication.unassignedStockCount ?? medication.stockCount,
+		...(medication.clinicName ? { clinicName: medication.clinicName } : {}),
 		updated_at: medication.updatedAt || new Date().toISOString(),
 		"updatedAt": medication.updatedAt || new Date().toISOString(),
 	});
@@ -81,10 +73,62 @@ function createMemoryDb() {
 	});
 
 	return {
+		async changeClinicMedicationStock(clinicName, medicationName, quantity, operation) {
+			if (operation === "dispense" && !hasActiveQueueTicket(memoryQueueTickets, clinicName)) {
+				return { error: "A patient must be in the active queue before medication can be dispensed.", status: 409 };
+			}
+			const item = clinicMedications.find((medication) => medication.clinicName === clinicName && medication.name === medicationName);
+			if (!item) return { error: "Clinic medication inventory not found.", status: 404 };
+			const movement = calculateStockMovement(item.stockCount, quantity, operation);
+			if (!movement.ok) return { error: movement.error, status: movement.status };
+			return rowForMedication(setClinicMedicationStock(clinicMedications, clinicName, medicationName, movement.stockCount));
+		},
+		async consumePasswordReset(email, tokenHash, newPasswordHash) {
+			const record = resetTokens.get(email);
+			const member = staff.find((item) => item.email.toLowerCase() === email && (item.role === "admin" || (item.role === "staff" && item.status === "approved")));
+			if (!record || !member || record.token_hash !== tokenHash || record.expires_at <= new Date()) return false;
+			member.password_hash = newPasswordHash;
+			resetTokens.delete(email);
+			return true;
+		},
 		async query(sql, params) {
 			const args = Array.isArray(params) ? params : [];
 			const text = String(sql).trim();
 			if (text.startsWith("CREATE EXTENSION") || text.startsWith("CREATE TABLE") || text.startsWith("ALTER TABLE") || text.startsWith("DO $$")) return { rows: [], rowCount: 0 };
+			if (text.startsWith("SELECT s.email FROM staff s WHERE s.email = $1 AND")) {
+				const email = String(args[0]).toLowerCase();
+				const member = staff.find((item) => item.email.toLowerCase() === email && (item.role === "admin" || (item.role === "staff" && item.status === "approved")));
+				return { rows: member ? [{ email: member.email }] : [] };
+			}
+			if (text.startsWith("INSERT INTO password_reset_tokens")) {
+				const [email, tokenHash, expiresAt] = args;
+				resetTokens.set(String(email).toLowerCase(), { token_hash: tokenHash, expires_at: new Date(expiresAt) });
+				return { rows: [], rowCount: 1 };
+			}
+			if (text.startsWith("SELECT r.email FROM password_reset_tokens r JOIN staff s")) {
+				const [emailValue, tokenHash] = args;
+				const email = String(emailValue).toLowerCase();
+				const record = resetTokens.get(email);
+				const member = staff.find((item) => item.email.toLowerCase() === email && (item.role === "admin" || (item.role === "staff" && item.status === "approved")));
+				return { rows: record && member && record.token_hash === tokenHash && record.expires_at > new Date() ? [{ email }] : [] };
+			}
+			if (text.startsWith("SELECT password_hash FROM staff WHERE email = $1 AND role = 'admin'")) {
+				const member = staff.find((item) => item.email.toLowerCase() === String(args[0]).toLowerCase() && item.role === "admin" && item.status === "approved");
+				return { rows: member ? [{ password_hash: member.password_hash }] : [] };
+			}
+			if (text.startsWith("SELECT password_hash FROM staff WHERE email = $1 AND role = 'staff'")) {
+				const member = staff.find((item) => item.email.toLowerCase() === String(args[0]).toLowerCase() && item.role === "staff" && item.status === "approved");
+				return { rows: member ? [{ password_hash: member.password_hash }] : [] };
+			}
+			if (text.startsWith("UPDATE staff SET password_hash = $1")) {
+				const member = staff.find((item) => item.email.toLowerCase() === String(args[1]).toLowerCase() && (item.role === "admin" || (item.role === "staff" && item.status === "approved")));
+				if (!member) return { rows: [], rowCount: 0 };
+				member.password_hash = args[0];
+				return { rows: [{ id: member.id }], rowCount: 1 };
+			}
+			if (text.startsWith("DELETE FROM password_reset_tokens WHERE email = $1")) {
+				return { rows: [], rowCount: resetTokens.delete(String(args[0]).toLowerCase()) ? 1 : 0 };
+			}
 			if (text.startsWith("SELECT s.id, s.name, s.email, s.role, s.status")) {
 				const query = staff.map(rowForStaff);
 				if (text.includes("WHERE s.email = $1")) {
@@ -96,33 +140,25 @@ function createMemoryDb() {
 			if (text.startsWith("SELECT COUNT(*)::int AS total FROM clinics")) return { rows: [{ total: clinics.length }] };
 			if (text.startsWith("SELECT COUNT(*)::int AS total FROM staff WHERE role = 'staff' AND status = 'approved'")) return { rows: [{ total: staff.filter((member) => member.role === "staff" && member.status === "approved").length }] };
 			if (text.startsWith("SELECT COUNT(*)::int AS total FROM staff WHERE role = 'staff' AND status = 'pending'")) return { rows: [{ total: staff.filter((member) => member.role === "staff" && member.status === "pending").length }] };
-			if (text.includes("SELECT name, province, district, address, latitude, longitude, hours, phone, wait, patients, stock, status, updated_at AS \"updatedAt\" FROM clinics")) {
+			if (text.includes("SELECT name, province, district, address, hours, phone, wait, patients, stock, status, updated_at AS \"updatedAt\" FROM clinics")) {
 				return { rows: clinics.map(rowForClinic) };
+			}
+			if ((text.includes("FROM clinic_medications cm") || text.includes("FROM clinic_medications ci")) && text.includes("WHERE c.name = $1 AND m.name = $2")) {
+				const item = clinicMedications.find((medication) => medication.clinicName === args[0] && medication.name === args[1]);
+				return { rows: item ? [rowForMedication(item)] : [] };
+			}
+			if (text.includes("FROM clinic_medications cm") && text.includes("ORDER BY m.id, c.id")) {
+				return { rows: clinicMedications.map(rowForMedication) };
+			}
+			if (text.includes("FROM clinic_medications cm") && text.includes("WHERE m.name = $1")) {
+				return { rows: clinicMedications.filter((item) => item.name === args[0]).map(rowForMedication) };
 			}
 			if (text.includes("SELECT name, category, availability, clinics, stock_count AS \"stockCount\"")) {
 				return { rows: medications.map(rowForMedication) };
 			}
-			if (text.includes('SELECT m.name, c.name AS "clinicName"') && text.includes("FROM clinic_medication_stock")) {
-				let rows = clinicMedicationStocks.map((stock) => {
-					const medication = medications.find((item) => item.id === stock.medicationId);
-					const clinic = clinics.find((item) => item.id === stock.clinicId);
-					return medication && clinic ? { medicationId: medication.id, clinicId: clinic.id, name: medication.name, clinicName: clinic.name, province: clinic.province, address: clinic.address, stockCount: stock.stockCount, updatedAt: stock.updatedAt } : null;
-				}).filter(Boolean);
-				if (text.includes("WHERE c.name = $1 AND m.name = $2")) rows = rows.filter((row) => row.clinicName === args[0] && row.name === args[1]);
-				if (text.includes("WHERE m.name = $1")) rows = rows.filter((row) => row.name === args[0]);
-				return { rows };
-			}
-			if (text.startsWith("SELECT id,") && text.includes('unassigned_stock_count AS "unassignedStockCount" FROM medications WHERE name = $1')) {
-				const medication = medications.find((item) => item.name === args[0]);
-				return { rows: medication ? [{ id: medication.id, name: medication.name, clinics: medication.clinics, stockCount: medication.stockCount, unassignedStockCount: medication.unassignedStockCount ?? medication.stockCount }] : [] };
-			}
-			if (text.startsWith("SELECT id, name FROM medications WHERE name = $1")) {
-				const medication = medications.find((item) => item.name === args[0]);
-				return { rows: medication ? [{ id: medication.id, name: medication.name }] : [] };
-			}
 			if (text.startsWith("INSERT INTO clinics")) {
 				const [name, province, district, address, hours, phone] = args;
-				const clinic = { id: clinics.length + 1, name, province, district, address, latitude: null, longitude: null, hours, phone, wait: null, patients: 0, stock: 0, status: "Open", updatedAt: new Date().toISOString() };
+				const clinic = { id: clinics.length + 1, name, province, district, address, hours, phone, wait: null, patients: 0, stock: 0, status: "Open", updatedAt: new Date().toISOString() };
 				clinics.push(clinic);
 				return { rows: [rowForClinic(clinic)] };
 			}
@@ -138,28 +174,44 @@ function createMemoryDb() {
 				const clinic = clinics.find((item) => item.name === args[0]);
 				return { rows: clinic ? [{ id: clinic.id }] : [] };
 			}
-			if (text.startsWith("SELECT id, name, status, hours FROM clinics WHERE name = $1")) {
+			if (text.startsWith("SELECT id, name, status FROM clinics WHERE name = $1")) {
 				const clinic = clinics.find((item) => item.name === args[0]);
-				return { rows: clinic ? [{ id: clinic.id, name: clinic.name, status: clinic.status, hours: clinic.hours }] : [] };
+				return { rows: clinic ? [{ id: clinic.id, name: clinic.name, status: clinic.status }] : [] };
 			}
 			if (text.startsWith("INSERT INTO medications")) {
 				const [name, category, availability, clinicsValue, stockCount] = args;
-				const item = { id: medications.length + 1, name, category, availability, clinics: clinicsValue, stockCount: Number(stockCount), unassignedStockCount: Number(stockCount) };
+				const item = { id: medications.length + 1, name, category, availability, clinics: clinicsValue, stockCount: Number(stockCount) };
 				medications.push(item);
 				return { rows: [rowForMedication(item)] };
 			}
-			if (text.startsWith("INSERT INTO clinic_medication_stock")) {
-				const [clinicId, medicationId, stockCount] = args;
-				let stock = clinicMedicationStocks.find((item) => item.clinicId === clinicId && item.medicationId === medicationId);
-				if (stock) {
-					stock.stockCount = Number(stockCount);
-					stock.updatedAt = new Date().toISOString();
-				} else {
-					stock = { clinicId, medicationId, stockCount: Number(stockCount), updatedAt: new Date().toISOString() };
-					clinicMedicationStocks.push(stock);
+			if (text.startsWith("INSERT INTO clinic_medications")) {
+				const [name] = args;
+				const medication = medications.find((item) => item.name === name);
+				if (!medication) return { rows: [] };
+				for (const clinic of clinics) {
+					if (!clinicMedications.some((item) => item.clinicName === clinic.name && item.name === name)) {
+						clinicMedications.push({ clinicName: clinic.name, name, category: medication.category, availability: getAvailability(medication.stockCount), clinics: `${clinic.name}: ${medication.stockCount} in stock`, stockCount: medication.stockCount });
+					}
 				}
-				const medication = medications.find((item) => item.id === medicationId);
-				return { rows: medication ? [{ name: medication.name, stockCount: stock.stockCount, updatedAt: stock.updatedAt }] : [] };
+				return { rows: [] };
+			}
+			if (text.startsWith("UPDATE clinic_medications AS ci")) {
+				const [name, clinicName] = args;
+				const item = clinicMedications.find((medication) => medication.clinicName === clinicName && medication.name === name && medication.stockCount > 0);
+				if (!item) return { rows: [] };
+				item.stockCount -= 1;
+				item.availability = getAvailability(item.stockCount);
+				item.clinics = `${clinicName}: ${item.stockCount} in stock`;
+				item.updatedAt = new Date().toISOString();
+				return { rows: [{ stockCount: item.stockCount }] };
+			}
+			if (text.startsWith("UPDATE clinic_medications SET")) {
+				const stockCount = text.includes("SET availability = $1") ? args[1] : args[0];
+				const clinicName = args[2];
+				const name = args[3];
+				const item = setClinicMedicationStock(clinicMedications, clinicName, name, Number(stockCount));
+				if (!item) return { rows: [] };
+				return { rows: [rowForMedication(item)] };
 			}
 			if (text.startsWith("UPDATE medications SET")) {
 				const availability = args[0];
@@ -171,7 +223,6 @@ function createMemoryDb() {
 				item.availability = availability;
 				item.clinics = clinicsValue;
 				item.stockCount = stockCount;
-				if (text.includes("unassigned_stock_count = $5")) item.unassignedStockCount = Number(args[4]);
 				item.updatedAt = new Date().toISOString();
 				return { rows: [rowForMedication(item)] };
 			}
@@ -218,7 +269,20 @@ function createMemoryDb() {
 	};
 }
 
-const pool = process.env.DATABASE_URL ? new Pool({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } }) : createMemoryDb();
+let pool = createMemoryDb();
+
+async function initializePool() {
+	if (!process.env.DATABASE_URL) return;
+	const dbPool = new Pool({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } });
+	try {
+		await dbPool.query("SELECT 1");
+		pool = dbPool;
+	} catch (error) {
+		console.warn("Database unavailable; using in-memory fallback mode.", error.message);
+		delete process.env.DATABASE_URL;
+		pool = createMemoryDb();
+	}
+}
 
 const ticketFromRow = (row, clinicName) => ({
 	id: row.id,
@@ -233,10 +297,6 @@ const ticketFromRow = (row, clinicName) => ({
 	callExpiresAt: row.call_expires_at ? new Date(row.call_expires_at).toISOString() : null,
 	capabilityHash: row.capability_hash,
 	createdAt: row.created_at ? new Date(row.created_at).toISOString() : new Date().toISOString(),
-	requestedMedications: normalizeRequestedMedications(row.requested_medication || row.requestedMedication),
-	requestedMedication: normalizeRequestedMedications(row.requested_medication || row.requestedMedication)[0] || null,
-	medicationCollected: Boolean(row.medication_collected ?? row.medicationCollected),
-	collectedAt: row.collected_at ? new Date(row.collected_at).toISOString() : null,
 	servedAt: row.served_at ? new Date(row.served_at).toISOString() : null,
 	cancelledAt: row.cancelled_at ? new Date(row.cancelled_at).toISOString() : null,
 	missedAt: row.missed_at ? new Date(row.missed_at).toISOString() : null,
@@ -256,12 +316,12 @@ async function getQueueTickets(clinicId, clinicName, date = queueDate(), clinicS
 	}
 	const result = clinicId === null
 		? await pool.query(
-			`SELECT q.id, q.queue_date::text AS queue_date, q.queue_number, q.issued_queue_number, q.status, q.scheduled_at, q.called_at, q.call_expires_at, q.capability_hash, q.created_at, q.requested_medication, q.medication_collected, q.collected_at, q.served_at, q.cancelled_at, q.missed_at, c.status AS clinic_status
+			`SELECT q.id, q.queue_date::text AS queue_date, q.queue_number, q.issued_queue_number, q.status, q.scheduled_at, q.called_at, q.call_expires_at, q.capability_hash, q.created_at, q.served_at, q.cancelled_at, q.missed_at, c.status AS clinic_status
 			 FROM queue_tickets q JOIN clinics c ON c.id = q.clinic_id WHERE c.name = $1 AND q.queue_date = $2 ORDER BY q.queue_number`,
 			[clinicName, date],
 		)
 		: await pool.query(
-			`SELECT id, queue_date::text AS queue_date, queue_number, issued_queue_number, status, scheduled_at, called_at, call_expires_at, capability_hash, created_at, requested_medication, medication_collected, collected_at, served_at, cancelled_at, missed_at, $3 AS clinic_status
+			`SELECT id, queue_date::text AS queue_date, queue_number, issued_queue_number, status, scheduled_at, called_at, call_expires_at, capability_hash, created_at, served_at, cancelled_at, missed_at, $3 AS clinic_status
 			 FROM queue_tickets WHERE clinic_id = $1 AND queue_date = $2 ORDER BY queue_number`,
 			[clinicId, date, clinicStatus],
 		);
@@ -276,25 +336,13 @@ const tickets = await getQueueTickets(clinicResult.rows[0].id, clinicName, queue
 	return { clinic: clinicResult.rows[0], tickets, summary: deriveQueue(tickets, new Date(), clinicResult.rows[0].status) };
 }
 
-async function createQueueTicket(clinicName, medicationName = null) {
-	const requestedMedications = normalizeRequestedMedications(medicationName);
-	const clinic = (await pool.query("SELECT id, name, status, hours FROM clinics WHERE name = $1", [clinicName])).rows[0];
+async function createQueueTicket(clinicName) {
+	const clinic = (await pool.query("SELECT id, name, status FROM clinics WHERE name = $1", [clinicName])).rows[0];
 	if (!clinic) return { error: "Clinic not found.", status: 404 };
-	if (!canAcceptQueueTickets(clinic.hours, clinic.status)) return { error: "This clinic is currently closed.", status: 409 };
-	for (const requestedMedication of requestedMedications) {
-		const medicationResult = await pool.query("SELECT id, name FROM medications WHERE name = $1", [requestedMedication]);
-		if (!medicationResult.rows[0]) return { error: `${requestedMedication} was not found.`, status: 404 };
-		const stockResult = await pool.query(`SELECT m.name, c.name AS "clinicName", c.province, c.address, s.stock_count AS "stockCount", s.updated_at AS "updatedAt"
-			FROM clinic_medication_stock s JOIN medications m ON m.id = s.medication_id JOIN clinics c ON c.id = s.clinic_id
-			WHERE c.name = $1 AND m.name = $2`, [clinicName, requestedMedication]);
-		if (!stockResult.rows[0] || Number(stockResult.rows[0].stockCount) <= 0) return { error: `${requestedMedication} is currently out of stock at ${clinicName}.`, status: 409 };
-	}
+	if (clinic.status === "Closed") return { error: "This clinic is currently closed.", status: 409 };
 	if (!process.env.DATABASE_URL) {
 		expireTickets(memoryQueueTickets);
 		const ticket = allocateTicket(memoryQueueTickets, clinicName, new Date(), clinic.status);
-		ticket.requestedMedications = requestedMedications;
-		ticket.requestedMedication = requestedMedications[0] || null;
-		ticket.medicationCollected = false;
 		memoryQueueTickets.push(ticket);
 		return { ticket: publicTicket(ticket, memoryQueueTickets, new Date(), clinic.status), capability: ticket.raw };
 	}
@@ -302,41 +350,31 @@ async function createQueueTicket(clinicName, medicationName = null) {
 	const client = await pool.connect();
 	try {
 		await client.query("BEGIN");
-		const clinicResult = await client.query("SELECT id, name, status, hours FROM clinics WHERE name = $1 FOR UPDATE", [clinicName]);
-		const clinic = clinicResult.rows[0];
-		if (!clinic) {
+		const clinicResult = await client.query("SELECT id, name, status FROM clinics WHERE name = $1 FOR UPDATE", [clinicName]);
+		const lockedClinic = clinicResult.rows[0];
+		if (!lockedClinic) {
 			await client.query("ROLLBACK");
 			return { error: "Clinic not found.", status: 404 };
 		}
-		if (!canAcceptQueueTickets(clinic.hours, clinic.status)) {
+		if (lockedClinic.status === "Closed") {
 			await client.query("ROLLBACK");
 			return { error: "This clinic is currently closed.", status: 409 };
 		}
-		for (const requestedMedication of requestedMedications) {
-			const stockResult = await client.query(`SELECT s.stock_count AS "stockCount" FROM clinic_medication_stock s JOIN medications m ON m.id = s.medication_id WHERE s.clinic_id = $1 AND m.name = $2 FOR UPDATE`, [clinic.id, requestedMedication]);
-			if (!stockResult.rows[0] || Number(stockResult.rows[0].stockCount) <= 0) {
-				await client.query("ROLLBACK");
-				return { error: `${requestedMedication} is currently out of stock at ${clinicName}.`, status: 409 };
-			}
-		}
 		await client.query("UPDATE queue_tickets SET status = 'missed', missed_at = NOW() WHERE status IN ('ready', 'called') AND call_expires_at <= NOW()");
 		const result = await client.query(
-			`SELECT id, queue_date::text AS queue_date, queue_number, issued_queue_number, status, scheduled_at, called_at, call_expires_at, capability_hash, created_at, requested_medication, medication_collected, collected_at, served_at, cancelled_at, missed_at
+			`SELECT id, queue_date::text AS queue_date, queue_number, issued_queue_number, status, scheduled_at, called_at, call_expires_at, capability_hash, created_at, served_at, cancelled_at, missed_at
 			 FROM queue_tickets WHERE clinic_id = $1 AND queue_date = CURRENT_DATE ORDER BY queue_number FOR UPDATE`,
-			[clinic.id],
+			[lockedClinic.id],
 		);
 		const existing = result.rows.map((row) => ticketFromRow(row, clinicName));
-		const ticket = allocateTicket(existing, clinicName, new Date(), clinic.status);
-		ticket.requestedMedications = requestedMedications;
-		ticket.requestedMedication = requestedMedications[0] || null;
-		ticket.medicationCollected = false;
+		const ticket = allocateTicket(existing, clinicName, new Date(), lockedClinic.status);
 		await client.query(
-			`INSERT INTO queue_tickets (id, clinic_id, queue_date, queue_number, issued_queue_number, status, scheduled_at, capability_hash, created_at, requested_medication, medication_collected)
-			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
-			[ticket.id, clinic.id, ticket.queueDate, ticket.queueNumber, ticket.issuedQueueNumber, ticket.status, ticket.scheduledAt, ticket.capabilityHash, ticket.createdAt, JSON.stringify(requestedMedications), ticket.medicationCollected],
+			`INSERT INTO queue_tickets (id, clinic_id, queue_date, queue_number, issued_queue_number, status, scheduled_at, capability_hash, created_at)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+			[ticket.id, lockedClinic.id, ticket.queueDate, ticket.queueNumber, ticket.issuedQueueNumber, ticket.status, ticket.scheduledAt, ticket.capabilityHash, ticket.createdAt],
 		);
 		await client.query("COMMIT");
-		return { ticket: publicTicket(ticket, [...existing, ticket], new Date(), clinic.status), capability: ticket.raw };
+		return { ticket: publicTicket(ticket, [...existing, ticket], new Date(), lockedClinic.status), capability: ticket.raw };
 	} catch (error) {
 		await client.query("ROLLBACK");
 		throw error;
@@ -353,7 +391,7 @@ async function findTicket(ticketId, capability) {
 		return { ticket, tickets: memoryQueueTickets.filter((item) => item.clinicName === ticket.clinicName && item.queueDate === ticket.queueDate) };
 	}
 	const result = await pool.query(
-			`SELECT q.id, q.queue_date::text AS queue_date, q.queue_number, q.issued_queue_number, q.status, q.scheduled_at, q.called_at, q.call_expires_at, q.capability_hash, q.created_at, q.requested_medication, q.medication_collected, q.collected_at, q.served_at, q.cancelled_at, q.missed_at, c.name AS clinic_name, c.status AS clinic_status
+			`SELECT q.id, q.queue_date::text AS queue_date, q.queue_number, q.issued_queue_number, q.status, q.scheduled_at, q.called_at, q.call_expires_at, q.capability_hash, q.created_at, q.served_at, q.cancelled_at, q.missed_at, c.name AS clinic_name, c.status AS clinic_status
 		 FROM queue_tickets q JOIN clinics c ON c.id = q.clinic_id WHERE q.id = $1 AND q.capability_hash = encode(digest($2, 'sha256'), 'hex')`,
 		[ticketId, capability],
 	);
@@ -367,9 +405,9 @@ async function settleDatabaseTicket(ticketId, capability, staffClinicName = null
 	try {
 		await client.query("BEGIN");
 		const ticketLookup = staffClinicName
-			? { text: `SELECT q.id, q.queue_date::text AS queue_date, q.queue_number, q.issued_queue_number, q.status, q.scheduled_at, q.called_at, q.call_expires_at, q.capability_hash, q.created_at, q.requested_medication, q.medication_collected, q.collected_at, q.served_at, q.cancelled_at, q.missed_at, c.name AS clinic_name, c.status AS clinic_status
+			? { text: `SELECT q.id, q.queue_date::text AS queue_date, q.queue_number, q.issued_queue_number, q.status, q.scheduled_at, q.called_at, q.call_expires_at, q.capability_hash, q.created_at, q.served_at, q.cancelled_at, q.missed_at, c.name AS clinic_name, c.status AS clinic_status
 				 FROM queue_tickets q JOIN clinics c ON c.id = q.clinic_id WHERE q.id = $1 AND c.name = $2 FOR UPDATE`, values: [ticketId, staffClinicName] }
-			: { text: `SELECT q.id, q.queue_date::text AS queue_date, q.queue_number, q.issued_queue_number, q.status, q.scheduled_at, q.called_at, q.call_expires_at, q.capability_hash, q.created_at, q.requested_medication, q.medication_collected, q.collected_at, q.served_at, q.cancelled_at, q.missed_at, c.name AS clinic_name, c.status AS clinic_status
+			: { text: `SELECT q.id, q.queue_date::text AS queue_date, q.queue_number, q.issued_queue_number, q.status, q.scheduled_at, q.called_at, q.call_expires_at, q.capability_hash, q.created_at, q.served_at, q.cancelled_at, q.missed_at, c.name AS clinic_name, c.status AS clinic_status
 				 FROM queue_tickets q JOIN clinics c ON c.id = q.clinic_id WHERE q.id = $1 AND q.capability_hash = encode(digest($2, 'sha256'), 'hex') FOR UPDATE`, values: [ticketId, capability] };
 		const ticketResult = await client.query(
 			ticketLookup.text,
@@ -384,40 +422,17 @@ async function settleDatabaseTicket(ticketId, capability, staffClinicName = null
 			await client.query("ROLLBACK");
 			return { error: "Only ready tickets can be served.", status: 409 };
 		}
-		if (row.medication_collected) {
-			await client.query("ROLLBACK");
-			return { error: "This ticket has already been served.", status: 409 };
-		}
 		const dueResult = await client.query("SELECT 1 FROM queue_tickets WHERE id = $1 AND scheduled_at <= NOW()", [ticketId]);
 		if (!dueResult.rows[0]) {
 			await client.query("ROLLBACK");
 			return { error: "This ticket is not ready for service yet.", status: 409 };
 		}
-
-		const requestedMedications = normalizeRequestedMedications(row.requested_medication);
-		let medicationCollected = false;
-		for (const requestedMedication of requestedMedications) {
-			const medicationResult = await client.query(
-				`UPDATE medications
-				 SET stock_count = stock_count - 1,
-				     availability = CASE WHEN stock_count - 1 = 0 THEN 'Out of Stock' WHEN stock_count - 1 >= 250 THEN 'In Stock' ELSE 'Low Stock' END
-				 WHERE name = $1 AND stock_count > 0
-				 RETURNING stock_count AS "stockCount"`,
-				[requestedMedication],
-			);
-			if (!medicationResult.rows[0]) {
-				await client.query("ROLLBACK");
-				return { error: "The requested medication is out of stock.", status: 409 };
-			}
-			medicationCollected = true;
-		}
-
 		const servedResult = await client.query(
 			`UPDATE queue_tickets
-			 SET status = 'served', served_at = NOW(), medication_collected = $2, collected_at = CASE WHEN $2 THEN NOW() ELSE collected_at END
-			 WHERE id = $1 AND status IN ('ready', 'called') AND medication_collected = FALSE
-			 RETURNING id, queue_date::text AS queue_date, queue_number, issued_queue_number, status, scheduled_at, called_at, call_expires_at, capability_hash, created_at, requested_medication, medication_collected, collected_at, served_at, cancelled_at, missed_at`,
-			[ticketId, medicationCollected],
+			 SET status = 'served', served_at = NOW()
+			 WHERE id = $1 AND status IN ('ready', 'called')
+			 RETURNING id, queue_date::text AS queue_date, queue_number, issued_queue_number, status, scheduled_at, called_at, call_expires_at, capability_hash, created_at, served_at, cancelled_at, missed_at`,
+			[ticketId],
 		);
 		if (!servedResult.rows[0]) {
 			await client.query("ROLLBACK");
@@ -433,20 +448,59 @@ async function settleDatabaseTicket(ticketId, capability, staffClinicName = null
 	}
 }
 
-async function collectMemoryTicketMedication(ticket) {
-	const medications = normalizeRequestedMedications(ticket.requestedMedications?.length ? ticket.requestedMedications : ticket.requestedMedication);
-	if (medications.length === 0) return true;
-	const medicationRows = [];
-	for (const name of medications) {
-		const rows = (await pool.query("SELECT name, stock_count AS \"stockCount\" FROM medications WHERE name = $1", [name])).rows;
-		if (!rows[0]) return false;
-		medicationRows.push(rows[0]);
+async function changeClinicMedicationStock(clinicName, medicationName, quantity, operation) {
+	if (!process.env.DATABASE_URL) {
+		return pool.changeClinicMedicationStock(clinicName, medicationName, quantity, operation);
 	}
-	if (!markMedicationCollected(ticket, medicationRows)) return false;
-	for (const medication of medicationRows) {
-		await pool.query("UPDATE medications SET stock_count = $1, availability = $2, updated_at = NOW() WHERE name = $3", [medication.stockCount, medication.stockCount === 0 ? "Out of Stock" : medication.stockCount >= 250 ? "In Stock" : "Low Stock", medication.name]);
+
+	const client = await pool.connect();
+	try {
+		await client.query("BEGIN");
+		const clinic = (await client.query("SELECT id FROM clinics WHERE name = $1 FOR UPDATE", [clinicName])).rows[0];
+		if (!clinic) {
+			await client.query("ROLLBACK");
+			return { error: "Clinic not found.", status: 404 };
+		}
+		if (operation === "dispense") {
+			const activeTicket = (await client.query(
+				`SELECT id FROM queue_tickets
+				 WHERE clinic_id = $1 AND queue_date = CURRENT_DATE AND status IN ('waiting', 'ready', 'called')
+				 LIMIT 1 FOR UPDATE`,
+				[clinic.id],
+			)).rows[0];
+			if (!activeTicket) {
+				await client.query("ROLLBACK");
+				return { error: "A patient must be in the active queue before medication can be dispensed.", status: 409 };
+			}
+		}
+		const current = (await client.query(
+			`SELECT c.id AS "clinicId", m.id AS "medicationId", m.name, m.category, cm.stock_count AS "stockCount"
+			 FROM clinic_medications cm JOIN clinics c ON c.id = cm.clinic_id JOIN medications m ON m.id = cm.medication_id
+			 WHERE c.name = $1 AND m.name = $2 FOR UPDATE`,
+			[clinicName, medicationName],
+		)).rows[0];
+		if (!current) {
+			await client.query("ROLLBACK");
+			return { error: "Clinic medication inventory not found.", status: 404 };
+		}
+		const movement = calculateStockMovement(Number(current.stockCount), quantity, operation);
+		if (!movement.ok) {
+			await client.query("ROLLBACK");
+			return { error: movement.error, status: movement.status };
+		}
+		const result = await client.query(
+			`UPDATE clinic_medications SET stock_count = $1, availability = $2, updated_at = NOW()
+			 WHERE clinic_id = $3 AND medication_id = $4 RETURNING updated_at AS "updatedAt"`,
+			[movement.stockCount, movement.availability, current.clinicId, current.medicationId],
+		);
+		await client.query("COMMIT");
+		return { name: current.name, category: current.category, clinicName, clinics: `${clinicName}: ${movement.stockCount} in stock`, stockCount: movement.stockCount, availability: movement.availability, updatedAt: result.rows[0].updatedAt };
+	} catch (error) {
+		await client.query("ROLLBACK");
+		throw error;
+	} finally {
+		client.release();
 	}
-	return true;
 }
 
 const send = (response, status, body) => {
@@ -475,6 +529,7 @@ const staffQuery = `
 `;
 
 async function ensureDatabase() {
+	await initializePool();
 	if (!process.env.DATABASE_URL) return;
 	await pool.query(`CREATE EXTENSION IF NOT EXISTS pgcrypto`);
 	await pool.query(`
@@ -484,8 +539,6 @@ async function ensureDatabase() {
 			province VARCHAR(100) NOT NULL DEFAULT 'Gauteng',
 			district VARCHAR(255),
 			address VARCHAR(255),
-			latitude DOUBLE PRECISION,
-			longitude DOUBLE PRECISION,
 			hours VARCHAR(255),
 			phone VARCHAR(255),
 			wait INTEGER,
@@ -496,13 +549,6 @@ async function ensureDatabase() {
 			created_at TIMESTAMP DEFAULT NOW()
 		)
 	`);
-	const clinicIdResult = await pool.query(`
-		SELECT data_type FROM information_schema.columns
-		WHERE table_schema = current_schema() AND table_name = 'clinics' AND column_name = 'id'
-	`);
-	const clinicIdTypeByDataType = { uuid: "UUID", integer: "INTEGER", bigint: "BIGINT" };
-	const clinicIdType = clinicIdTypeByDataType[clinicIdResult.rows[0]?.data_type];
-	if (!clinicIdType) throw new Error("Unsupported clinics.id column type.");
 	await pool.query(`
 		CREATE TABLE IF NOT EXISTS medications (
 			id SERIAL PRIMARY KEY,
@@ -512,34 +558,38 @@ async function ensureDatabase() {
 			clinics VARCHAR(255) NOT NULL
 		)
 	`);
-	const medicationIdResult = await pool.query(`
-		SELECT data_type FROM information_schema.columns
-		WHERE table_schema = current_schema() AND table_name = 'medications' AND column_name = 'id'
-	`);
-	const medicationIdType = clinicIdTypeByDataType[medicationIdResult.rows[0]?.data_type];
-	if (!medicationIdType) throw new Error("Unsupported medications.id column type.");
 	await pool.query(`ALTER TABLE medications ADD COLUMN IF NOT EXISTS category VARCHAR(255) NOT NULL DEFAULT 'Uncategorized'`);
 	await pool.query(`ALTER TABLE medications ADD COLUMN IF NOT EXISTS availability VARCHAR(20) NOT NULL DEFAULT 'In Stock'`);
 	await pool.query(`ALTER TABLE medications ADD COLUMN IF NOT EXISTS clinics VARCHAR(255) NOT NULL DEFAULT ''`);
 	await pool.query(`ALTER TABLE medications ADD COLUMN IF NOT EXISTS stock_count INTEGER NOT NULL DEFAULT 0`);
-	await pool.query(`ALTER TABLE medications ADD COLUMN IF NOT EXISTS unassigned_stock_count INTEGER`);
-	await pool.query(`UPDATE medications SET unassigned_stock_count = stock_count WHERE unassigned_stock_count IS NULL`);
-	await pool.query(`ALTER TABLE medications ALTER COLUMN unassigned_stock_count SET DEFAULT 0`);
-	await pool.query(`ALTER TABLE medications ALTER COLUMN unassigned_stock_count SET NOT NULL`);
 	await pool.query(`ALTER TABLE medications ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()`);
 	await pool.query(`
-		CREATE TABLE IF NOT EXISTS clinic_medication_stock (
-			clinic_id ${clinicIdType} NOT NULL REFERENCES clinics(id) ON DELETE CASCADE,
-			medication_id ${medicationIdType} NOT NULL REFERENCES medications(id) ON DELETE CASCADE,
-			stock_count INTEGER NOT NULL CHECK (stock_count >= 0),
-			updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+		CREATE TABLE IF NOT EXISTS clinic_medications (
+			clinic_id INTEGER NOT NULL REFERENCES clinics(id) ON DELETE CASCADE,
+			medication_id INTEGER NOT NULL REFERENCES medications(id) ON DELETE CASCADE,
+			stock_count INTEGER NOT NULL DEFAULT 0 CHECK (stock_count >= 0),
+			availability VARCHAR(20) NOT NULL DEFAULT 'Out of Stock',
+			updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
 			PRIMARY KEY (clinic_id, medication_id)
 		)
 	`);
+	await pool.query(`DO $$
+	BEGIN
+		IF NOT EXISTS (
+			SELECT 1 FROM information_schema.columns
+			WHERE table_schema = current_schema() AND table_name = 'clinic_medications' AND column_name = 'stock_count'
+		) THEN
+			ALTER TABLE clinic_medications ADD COLUMN stock_count INTEGER NOT NULL DEFAULT 0;
+			IF EXISTS (
+				SELECT 1 FROM information_schema.columns
+				WHERE table_schema = current_schema() AND table_name = 'clinic_medications' AND column_name = 'stock_quantity'
+			) THEN
+				UPDATE clinic_medications SET stock_count = stock_quantity;
+			END IF;
+		END IF;
+	END $$`);
 	await pool.query(`ALTER TABLE clinics ADD COLUMN IF NOT EXISTS wait INTEGER`);
 	await pool.query(`ALTER TABLE clinics ADD COLUMN IF NOT EXISTS province VARCHAR(100) NOT NULL DEFAULT 'Gauteng'`);
-	await pool.query(`ALTER TABLE clinics ADD COLUMN IF NOT EXISTS latitude DOUBLE PRECISION`);
-	await pool.query(`ALTER TABLE clinics ADD COLUMN IF NOT EXISTS longitude DOUBLE PRECISION`);
 	await pool.query(`ALTER TABLE clinics ADD COLUMN IF NOT EXISTS patients INTEGER NOT NULL DEFAULT 0`);
 	await pool.query(`ALTER TABLE clinics ADD COLUMN IF NOT EXISTS stock INTEGER NOT NULL DEFAULT 0`);
 	await pool.query(`ALTER TABLE clinics ADD COLUMN IF NOT EXISTS status VARCHAR(20) NOT NULL DEFAULT 'Open'`);
@@ -560,16 +610,24 @@ async function ensureDatabase() {
 			email VARCHAR(255) UNIQUE NOT NULL,
 			password_hash VARCHAR(255) NOT NULL,
 			role VARCHAR(20) NOT NULL DEFAULT 'staff',
-			clinic_id ${clinicIdType} REFERENCES clinics(id),
+			clinic_id INTEGER REFERENCES clinics(id),
 			status VARCHAR(20) NOT NULL DEFAULT 'pending',
 			created_at TIMESTAMP DEFAULT NOW(),
 			updated_at TIMESTAMP DEFAULT NOW()
 		)
 	`);
 	await pool.query(`
+		CREATE TABLE IF NOT EXISTS password_reset_tokens (
+			email VARCHAR(255) PRIMARY KEY REFERENCES staff(email) ON DELETE CASCADE,
+			token_hash CHAR(64) NOT NULL,
+			expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
+			created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+		)
+	`);
+	await pool.query(`
 		CREATE TABLE IF NOT EXISTS queue_tickets (
 			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-			clinic_id ${clinicIdType} NOT NULL REFERENCES clinics(id),
+			clinic_id INTEGER NOT NULL REFERENCES clinics(id),
 			queue_date DATE NOT NULL,
 			queue_number INTEGER NOT NULL,
 			status VARCHAR(20) NOT NULL DEFAULT 'waiting',
@@ -578,9 +636,6 @@ async function ensureDatabase() {
 			call_expires_at TIMESTAMP WITH TIME ZONE,
 			capability_hash CHAR(64) NOT NULL,
 			created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
-			requested_medication VARCHAR(255),
-			medication_collected BOOLEAN NOT NULL DEFAULT FALSE,
-			collected_at TIMESTAMP WITH TIME ZONE,
 			served_at TIMESTAMP WITH TIME ZONE,
 			cancelled_at TIMESTAMP WITH TIME ZONE,
 			missed_at TIMESTAMP WITH TIME ZONE,
@@ -589,9 +644,7 @@ async function ensureDatabase() {
 	`);
 	await pool.query("CREATE INDEX IF NOT EXISTS queue_tickets_clinic_status_idx ON queue_tickets (clinic_id, queue_date, status)");
 	await pool.query("ALTER TABLE queue_tickets ADD COLUMN IF NOT EXISTS issued_queue_number INTEGER");
-	await pool.query("ALTER TABLE queue_tickets ADD COLUMN IF NOT EXISTS requested_medication VARCHAR(255)");
-	await pool.query("ALTER TABLE queue_tickets ADD COLUMN IF NOT EXISTS medication_collected BOOLEAN NOT NULL DEFAULT FALSE");
-	await pool.query("ALTER TABLE queue_tickets ADD COLUMN IF NOT EXISTS collected_at TIMESTAMP WITH TIME ZONE");
+	await pool.query("ALTER TABLE queue_tickets DROP COLUMN IF EXISTS requested_medication, DROP COLUMN IF EXISTS medication_collected, DROP COLUMN IF EXISTS collected_at");
 	await pool.query("ALTER TABLE queue_tickets ADD COLUMN IF NOT EXISTS served_at TIMESTAMP WITH TIME ZONE");
 	await pool.query("ALTER TABLE queue_tickets ADD COLUMN IF NOT EXISTS cancelled_at TIMESTAMP WITH TIME ZONE");
 	await pool.query("ALTER TABLE queue_tickets ADD COLUMN IF NOT EXISTS missed_at TIMESTAMP WITH TIME ZONE");
@@ -620,52 +673,85 @@ async function ensureDatabase() {
 		await pool.query("UPDATE clinics SET province = $1 WHERE name = $2", [clinic.province, clinic.name]);
 	}
 
-	const adminEmail = process.env.ADMIN_EMAIL || "sys.admin@carequeue.gov";
-	await pool.query(
-		`INSERT INTO staff (name, email, password_hash, role, status)
-		 VALUES ($1, $2, $3, 'admin', 'approved')
-		 ON CONFLICT (email) DO NOTHING`,
-		["System Administrator", adminEmail, "managed-by-portal"],
-	);
+	const adminEmail = process.env.ADMIN_EMAIL?.trim().toLowerCase();
+	if (adminEmail && process.env.ADMIN_PASSWORD) {
+		const initialAdminHash = hashPassword(process.env.ADMIN_PASSWORD);
+		await pool.query(
+			`INSERT INTO staff (name, email, password_hash, role, status)
+			 VALUES ($1, $2, $3, 'admin', 'approved')
+			 ON CONFLICT (email) DO UPDATE SET password_hash = EXCLUDED.password_hash
+			 WHERE staff.password_hash = 'managed-by-portal'`,
+			["System Administrator", adminEmail, initialAdminHash],
+		);
+	}
 
 	const clinicId = await pool.query("SELECT id FROM clinics WHERE name = 'Metro Family Care Centre'");
 	if (clinicId.rows[0]) {
+		const seedStaffHash = hashPassword(createResetToken());
 		await pool.query(
 			`INSERT INTO staff (name, email, password_hash, role, clinic_id, status)
 			 VALUES ($1, $2, $3, 'staff', $4, 'approved')
 			 ON CONFLICT (email) DO NOTHING`,
-			["Dr. Sarah Jenkins", "s.jenkins@metrocare.gov", "managed-by-portal", clinicId.rows[0].id],
+			["Dr. Sarah Jenkins", "s.jenkins@metrocare.gov", seedStaffHash, clinicId.rows[0].id],
 		);
 	}
 
 	for (const medication of defaultMedications) {
 		await pool.query(
-			`INSERT INTO medications (name, category, availability, clinics, stock_count, unassigned_stock_count) VALUES ($1, $2, $3, $4, $5, $5) ON CONFLICT (name) DO NOTHING`,
+			`INSERT INTO medications (name, category, availability, clinics, stock_count) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (name) DO NOTHING`,
 			[medication.name, medication.category, medication.availability, medication.clinics, medication.stockCount],
 		);
 	}
-	const legacyMedicationRows = (await pool.query(`SELECT id, name, clinics, stock_count AS "stockCount" FROM medications`)).rows;
-	const clinicRows = (await pool.query(`SELECT id, name FROM clinics ORDER BY id`)).rows;
-	for (const medication of legacyMedicationRows) {
-		for (const clinic of clinicRows) {
-			const stockCount = parseLegacyClinicStock(medication.clinics, clinic.name);
-			if (stockCount === null) continue;
-			await pool.query(
-				`INSERT INTO clinic_medication_stock (clinic_id, medication_id, stock_count) VALUES ($1, $2, $3) ON CONFLICT (clinic_id, medication_id) DO NOTHING`,
-				[clinic.id, medication.id, stockCount],
-			);
-		}
-	}
-	await pool.query(`
-		UPDATE medications m
-		SET unassigned_stock_count = GREATEST(m.stock_count - COALESCE((SELECT SUM(s.stock_count) FROM clinic_medication_stock s WHERE s.medication_id = m.id), 0), 0)
-	`);
 	await pool.query(`UPDATE medications SET availability = CASE WHEN stock_count = 0 THEN 'Out of Stock' WHEN stock_count >= 250 THEN 'In Stock' ELSE 'Low Stock' END`);
+	await pool.query(`
+		INSERT INTO clinic_medications (clinic_id, medication_id, stock_count, availability)
+		SELECT c.id, m.id, m.stock_count,
+			CASE WHEN m.stock_count = 0 THEN 'Out of Stock' WHEN m.stock_count >= 250 THEN 'In Stock' ELSE 'Low Stock' END
+		FROM clinics c CROSS JOIN medications m
+		ON CONFLICT (clinic_id, medication_id) DO NOTHING
+	`);
 	await pool.query(`UPDATE clinics SET wait = 12, patients = 4, stock = 98 WHERE name = 'Metro Family Care Centre' AND wait IS NULL`);
 	await pool.query(`UPDATE clinics SET wait = 35, patients = 14, stock = 84 WHERE name = 'Northside Public Health Clinic' AND wait IS NULL`);
 	await pool.query(`UPDATE clinics SET wait = 55, patients = 25, stock = 90 WHERE name = 'Eastside Community Dispensary' AND wait IS NULL`);
 	await pool.query(`UPDATE clinics SET patients = 0, stock = 55, status = 'Closed' WHERE name = 'Lakeside Community Clinic' AND stock = 0`);
 	await pool.query(`UPDATE clinics SET wait = 8, patients = 2, stock = 95 WHERE name = 'Oakridge Triage & Care Node' AND wait IS NULL`);
+}
+
+async function consumePasswordReset(email, tokenHash, passwordHash) {
+	if (!process.env.DATABASE_URL && typeof pool.consumePasswordReset === "function") {
+		return pool.consumePasswordReset(email, tokenHash, passwordHash);
+	}
+	const client = await pool.connect();
+	try {
+		await client.query("BEGIN");
+		const reset = await client.query(
+			`SELECT r.email FROM password_reset_tokens r JOIN staff s ON s.email = r.email
+			 WHERE r.email = $1 AND r.token_hash = $2 AND r.expires_at > NOW()
+			 AND (s.role = 'admin' OR (s.role = 'staff' AND s.status = 'approved')) FOR UPDATE OF r, s`,
+			[email, tokenHash],
+		);
+		if (!reset.rows[0]) {
+			await client.query("ROLLBACK");
+			return false;
+		}
+		const changed = await client.query(
+			`UPDATE staff SET password_hash = $1, updated_at = NOW()
+			 WHERE email = $2 AND (role = 'admin' OR (role = 'staff' AND status = 'approved')) RETURNING id`,
+			[passwordHash, email],
+		);
+		if (!changed.rows[0]) {
+			await client.query("ROLLBACK");
+			return false;
+		}
+		await client.query("DELETE FROM password_reset_tokens WHERE email = $1", [email]);
+		await client.query("COMMIT");
+		return true;
+	} catch (error) {
+		await client.query("ROLLBACK");
+		throw error;
+	} finally {
+		client.release();
+	}
 }
 
 async function handleRequest(request, response) {
@@ -691,47 +777,31 @@ async function handleRequest(request, response) {
 			});
 		}
 
-		const publicDataUrl = new URL(request.url, "http://localhost");
-		if (request.method === "GET" && publicDataUrl.pathname === "/api/public-data") {
-			const demoStockData = isDemoStockDataEnabled() && publicDataUrl.searchParams.get("demo") === "true";
-			const [clinicResult, medicationResult, clinicStockResult] = await Promise.all([
-				pool.query("SELECT name, province, district, address, latitude, longitude, hours, phone, wait, patients, stock, status, updated_at AS \"updatedAt\" FROM clinics ORDER BY id"),
-				pool.query("SELECT name, category, availability, clinics, stock_count AS \"stockCount\", updated_at AS \"updatedAt\" FROM medications ORDER BY id"),
-				pool.query(`SELECT m.name, c.name AS "clinicName", c.province, c.address, s.stock_count AS "stockCount", s.updated_at AS "updatedAt"
-					FROM clinic_medication_stock s JOIN medications m ON m.id = s.medication_id JOIN clinics c ON c.id = s.clinic_id
-					ORDER BY m.id, c.name`),
+		if (request.method === "GET" && request.url === "/api/public-data") {
+			const [clinicResult, medicationResult] = await Promise.all([
+				pool.query("SELECT name, province, district, address, hours, phone, wait, patients, stock, status, updated_at AS \"updatedAt\" FROM clinics ORDER BY id"),
+				pool.query(`SELECT m.name, m.category, cm.availability, c.name AS "clinicName", CONCAT(c.name, ': ', cm.stock_count, ' in stock') AS clinics, cm.stock_count AS "stockCount", cm.updated_at AS "updatedAt"
+					FROM clinic_medications cm JOIN clinics c ON c.id = cm.clinic_id JOIN medications m ON m.id = cm.medication_id
+					ORDER BY m.id, c.id`),
 			]);
-			const clinicStockRows = demoStockData
-				? addDemoClinicStockRows(clinicResult.rows, medicationResult.rows, clinicStockResult.rows)
-				: clinicStockResult.rows;
-			const publicMedicationRows = demoStockData
-				? medicationResult.rows.map((medication) => {
-					const stockCount = clinicStockRows
-						.filter((stock) => stock.name === medication.name)
-						.reduce((total, stock) => total + Number(stock.stockCount), 0);
-					return { ...medication, stockCount, availability: getAvailability(stockCount), updatedAt: new Date().toISOString() };
-				})
-				: medicationResult.rows;
 			const clinicsWithQueue = await Promise.all(clinicResult.rows.map(async (clinic) => {
 				const queue = await getClinicQueue(clinic.name);
-				const queueStatus = queue?.summary.status ?? "Open - Low Wait";
-				const status = getEffectiveClinicStatus(clinic.hours, queueStatus);
-				return { ...clinic, status, patients: queue?.summary.patients ?? 0, wait: queue?.summary.wait ?? 0, nextQueueNumber: queue?.summary.nextQueueNumber ?? 1, queueUpdatedAt: queue?.summary.updatedAt ?? new Date().toISOString() };
+				return { ...clinic, status: queue?.summary.status ?? "Open - Low Wait", patients: queue?.summary.patients ?? 0, wait: queue?.summary.wait ?? 0, nextQueueNumber: queue?.summary.nextQueueNumber ?? 1, queueUpdatedAt: queue?.summary.updatedAt ?? new Date().toISOString() };
 			}));
-			return send(response, 200, { clinics: clinicsWithQueue, medications: attachClinicStock(publicMedicationRows, clinicStockRows), demoStockData });
+			return send(response, 200, { clinics: clinicsWithQueue, medications: medicationResult.rows });
 		}
 
 		const queueCreateMatch = request.url.match(/^\/api\/clinics\/([^/]+)\/queue-tickets$/);
 		if (queueCreateMatch && request.method === "GET") {
 			const clinicName = decodeURIComponent(queueCreateMatch[1]);
-			const clinicResult = await pool.query("SELECT id, status FROM clinics WHERE name = $1", [clinicName]);
+			const clinicResult = await pool.query("SELECT id, name, status FROM clinics WHERE name = $1", [clinicName]);
 			if (!clinicResult.rows[0]) return send(response, 404, { error: "Clinic not found." });
 			const tickets = await getQueueTickets(clinicResult.rows[0].id, clinicName, queueDate(), clinicResult.rows[0].status);
 			return send(response, 200, { clinicName, tickets: tickets.map((ticket) => publicTicket(ticket, tickets, new Date(), clinicResult.rows[0].status)) });
 		}
 		if (queueCreateMatch && request.method === "POST") {
-			const body = await readBody(request);
-			const result = await createQueueTicket(decodeURIComponent(queueCreateMatch[1]), body?.medications ?? body?.medication ?? null);
+			await readBody(request);
+			const result = await createQueueTicket(decodeURIComponent(queueCreateMatch[1]));
 			return result.ticket ? send(response, 201, result) : send(response, result.status, { error: result.error });
 		}
 
@@ -741,7 +811,7 @@ async function handleRequest(request, response) {
 			return result ? send(response, 200, publicTicket(result.ticket, result.tickets)) : send(response, 404, { error: "Queue ticket not found or access has expired." });
 		}
 
-		const staffTicketActionMatch = request.url.match(/^\/api\/clinics\/([^/]+)\/queue-tickets\/([^/]+)\/(approve|serve|miss)$/);
+		const staffTicketActionMatch = request.url.match(/^\/api\/clinics\/([^/]+)\/queue-tickets\/([^/]+)\/(call|approve|serve|miss)$/);
 		if (staffTicketActionMatch && request.method === "POST") {
 			const clinicName = decodeURIComponent(staffTicketActionMatch[1]);
 			const ticketId = staffTicketActionMatch[2];
@@ -753,7 +823,7 @@ async function handleRequest(request, response) {
 				return send(response, 200, publicTicket(settlement.ticket, refreshedTickets));
 			}
 			if (process.env.DATABASE_URL) {
-				const result = action === "approve"
+				const result = action === "call" || action === "approve"
 					? await pool.query("UPDATE queue_tickets q SET status = 'ready', called_at = NOW(), call_expires_at = NOW() + ($3 * INTERVAL '1 minute') FROM clinics c WHERE q.id = $1 AND q.clinic_id = c.id AND c.name = $2 AND q.status = 'waiting' RETURNING q.id", [ticketId, clinicName, 5])
 					: await pool.query("UPDATE queue_tickets q SET status = 'missed', missed_at = NOW() FROM clinics c WHERE q.id = $1 AND q.clinic_id = c.id AND c.name = $2 AND q.status IN ('waiting', 'ready', 'called') RETURNING q.id", [ticketId, clinicName]);
 				if (!result.rows[0]) return send(response, 409, { error: "This ticket cannot be updated in its current state." });
@@ -763,11 +833,10 @@ async function handleRequest(request, response) {
 			}
 			const ticket = memoryQueueTickets.find((item) => item.id === ticketId && item.clinicName === clinicName);
 			if (!ticket) return send(response, 404, { error: "Queue ticket not found." });
-			if (action === "approve") {
+			if (action === "call" || action === "approve") {
 				if (!callTicket(ticket)) return send(response, 409, { error: "Only waiting tickets can be approved." });
 			} else if (action === "serve") {
 				if (!canServeTicket(ticket)) return send(response, 409, { error: "This ticket is not ready for service yet." });
-				if (!await collectMemoryTicketMedication(ticket)) return send(response, 409, { error: "One or more requested medications are out of stock." });
 				ticket.status = "served";
 				ticket.servedAt = new Date().toISOString();
 			} else {
@@ -798,7 +867,6 @@ async function handleRequest(request, response) {
 				if (!callTicket(result.ticket)) return send(response, 409, { error: "This ticket cannot be called in its current state." });
 			} else if (action === "complete") {
 				if (!canServeTicket(result.ticket)) return send(response, 409, { error: "This ticket is not ready for service yet." });
-				if (!await collectMemoryTicketMedication(result.ticket)) return send(response, 409, { error: "One or more requested medications are out of stock." });
 				result.ticket.status = "served";
 				result.ticket.servedAt = new Date().toISOString();
 			} else if (action === "miss") {
@@ -810,8 +878,8 @@ async function handleRequest(request, response) {
 				return send(response, 200, publicTicket(result.ticket, memoryQueueTickets));
 			}
 			await pool.query(
-				`UPDATE queue_tickets SET status = $1, called_at = $2, call_expires_at = $3, medication_collected = $4, collected_at = $5, served_at = $6, cancelled_at = $7, missed_at = $8 WHERE id = $9`,
-				[result.ticket.status, result.ticket.calledAt, result.ticket.callExpiresAt, Boolean(result.ticket.medicationCollected), result.ticket.collectedAt, result.ticket.servedAt || null, result.ticket.cancelledAt || null, result.ticket.missedAt || null, result.ticket.id],
+				`UPDATE queue_tickets SET status = $1, called_at = $2, call_expires_at = $3, served_at = $4, cancelled_at = $5, missed_at = $6 WHERE id = $7`,
+				[result.ticket.status, result.ticket.calledAt, result.ticket.callExpiresAt, result.ticket.servedAt || null, result.ticket.cancelledAt || null, result.ticket.missedAt || null, result.ticket.id],
 			);
 				const refreshedTickets = await getQueueTickets(null, result.ticket.clinicName, result.ticket.queueDate);
 				return send(response, 200, publicTicket(result.ticket, refreshedTickets));
@@ -830,10 +898,16 @@ async function handleRequest(request, response) {
 			const clinics = String(body.clinics || "All clinics").trim() || "All clinics";
 			try {
 				const result = await pool.query(
-					`INSERT INTO medications (name, category, availability, clinics, stock_count, unassigned_stock_count)
-					 VALUES ($1, $2, $3, $4, $5, $5)
+					`INSERT INTO medications (name, category, availability, clinics, stock_count)
+					 VALUES ($1, $2, $3, $4, $5)
 					 RETURNING name, category, availability, clinics, stock_count AS "stockCount"`,
 					[name, category, availability, clinics, stockCount],
+				);
+				await pool.query(
+					`INSERT INTO clinic_medications (clinic_id, medication_id, stock_count, availability)
+					 SELECT c.id, m.id, m.stock_count, m.availability FROM clinics c CROSS JOIN medications m WHERE m.name = $1
+					 ON CONFLICT (clinic_id, medication_id) DO NOTHING`,
+					[name],
 				);
 				return send(response, 201, result.rows[0]);
 			} catch (error) {
@@ -858,87 +932,118 @@ async function handleRequest(request, response) {
 			return send(response, 200, { ...result.rows[0], status: queue?.summary.status ?? "Open - Low Wait", patients: queue?.summary.patients ?? 0, wait: queue?.summary.wait ?? 0 });
 		}
 
-		const clinicMedicationStockMatch = request.url.match(/^\/api\/clinics\/([^/]+)\/medications\/([^/]+)$/);
-		if (clinicMedicationStockMatch && request.method === "PATCH") {
+		const medicationMovementMatch = request.url.match(/^\/api\/clinics\/([^/]+)\/medication-(dispenses|restocks)$/);
+		if (medicationMovementMatch && request.method === "POST") {
 			const body = await readBody(request);
-			const parsedStock = parseStockCount(body.stockCount);
-			if (!parsedStock.ok) return send(response, 400, { error: parsedStock.message });
-
-			const clinicName = decodeURIComponent(clinicMedicationStockMatch[1]);
-			const medicationName = decodeURIComponent(clinicMedicationStockMatch[2]);
-			const clinicResult = await pool.query("SELECT id FROM clinics WHERE name = $1", [clinicName]);
-			if (!clinicResult.rows[0]) return send(response, 404, { error: "Clinic not found." });
-			const medicationResult = await pool.query('SELECT id, name, clinics, stock_count AS "stockCount", unassigned_stock_count AS "unassignedStockCount" FROM medications WHERE name = $1', [medicationName]);
-			if (!medicationResult.rows[0]) return send(response, 404, { error: "Medication not found." });
-
-			const clinicId = clinicResult.rows[0].id;
-			const medication = medicationResult.rows[0];
-			await pool.query(
-				`INSERT INTO clinic_medication_stock (clinic_id, medication_id, stock_count, updated_at)
-				 VALUES ($1, $2, $3, NOW())
-				 ON CONFLICT (clinic_id, medication_id) DO UPDATE SET stock_count = EXCLUDED.stock_count, updated_at = NOW()`,
-				[clinicId, medication.id, parsedStock.value],
-			);
-			const stockRows = (await pool.query(`SELECT m.name, c.name AS "clinicName", c.province, c.address, s.stock_count AS "stockCount", s.updated_at AS "updatedAt"
-				FROM clinic_medication_stock s JOIN medications m ON m.id = s.medication_id JOIN clinics c ON c.id = s.clinic_id ORDER BY m.id, c.name`)).rows;
-			const clinicTotal = stockRows.filter((row) => row.name === medicationName).reduce((total, row) => total + Number(row.stockCount), 0);
-			const stockCount = Number(medication.unassignedStockCount ?? 0) + clinicTotal;
-			const savedResult = await pool.query(
-				`UPDATE medications SET availability = $1, stock_count = $2, updated_at = NOW() WHERE name = $3
-				 RETURNING name, category, availability, clinics, stock_count AS "stockCount", updated_at AS "updatedAt"`,
-				[getAvailability(stockCount), stockCount, medicationName],
-			);
-			return send(response, 200, attachClinicStock(savedResult.rows, stockRows)[0]);
+			const medicationName = String(body.medication || "").trim();
+			const quantity = parseStockCount(body.quantity);
+			if (!medicationName || !quantity.ok || quantity.value === 0) {
+				return send(response, 400, { error: quantity.ok ? "Medication and a positive whole quantity are required." : quantity.message });
+			}
+			const operation = medicationMovementMatch[2] === "dispenses" ? "dispense" : "restock";
+			const result = await changeClinicMedicationStock(decodeURIComponent(medicationMovementMatch[1]), medicationName, quantity.value, operation);
+			return result.error ? send(response, result.status, { error: result.error }) : send(response, 200, result);
 		}
 
 		const medicationUpdateMatch = request.url.match(/^\/api\/medications\/([^/]+)$/);
 		if (medicationUpdateMatch && request.method === "PATCH") {
 			const body = await readBody(request);
+			const clinicName = String(body.clinic || "").trim();
+			if (!clinicName) return send(response, 400, { error: "Select a clinic for this stock update." });
 			const parsedStock = parseStockCount(body.stockCount);
 			if (!parsedStock.ok) {
 				return send(response, 400, { error: parsedStock.message });
 			}
 			const stockCount = parsedStock.value;
 			const medicationName = decodeURIComponent(medicationUpdateMatch[1]);
-			const stockRows = (await pool.query(`SELECT m.name, c.name AS "clinicName", c.province, c.address, s.stock_count AS "stockCount", s.updated_at AS "updatedAt"
-				FROM clinic_medication_stock s JOIN medications m ON m.id = s.medication_id JOIN clinics c ON c.id = s.clinic_id ORDER BY m.id, c.name`)).rows;
-			const clinicTotal = stockRows.filter((row) => row.name === medicationName).reduce((total, row) => total + Number(row.stockCount), 0);
-			const aggregateStock = stockCount + clinicTotal;
-			const result = await pool.query(
-				"UPDATE medications SET availability = $1, clinics = $2, stock_count = $3, unassigned_stock_count = $5, updated_at = NOW() WHERE name = $4 RETURNING name, category, availability, clinics, stock_count AS \"stockCount\", updated_at AS \"updatedAt\"",
-				[getAvailability(aggregateStock), String(body.clinics || "All clinics").trim() || "All clinics", aggregateStock, medicationName, stockCount],
+			const inventoryResult = await pool.query(
+				`UPDATE clinic_medications SET availability = $1, stock_count = $2, updated_at = NOW()
+				 WHERE clinic_id = (SELECT id FROM clinics WHERE name = $3) AND medication_id = (SELECT id FROM medications WHERE name = $4)
+				 RETURNING stock_count AS "stockCount", availability, updated_at AS "updatedAt"`,
+				[getAvailability(stockCount), stockCount, clinicName, medicationName],
 			);
-			return result.rows[0] ? send(response, 200, attachClinicStock(result.rows, stockRows)[0]) : send(response, 404, { error: "Medication not found." });
+			if (!inventoryResult.rows[0]) return send(response, 404, { error: "Clinic or medication inventory not found." });
+			const result = await pool.query(
+				`SELECT m.name, m.category, ci.availability, c.name AS "clinicName", CONCAT(c.name, ': ', ci.stock_count, ' in stock') AS clinics, ci.stock_count AS "stockCount", ci.updated_at AS "updatedAt"
+				 FROM clinic_medications ci JOIN clinics c ON c.id = ci.clinic_id JOIN medications m ON m.id = ci.medication_id
+				 WHERE c.name = $1 AND m.name = $2`,
+				[clinicName, medicationName],
+			);
+			return send(response, 200, result.rows[0]);
+		}
+
+		if (request.method === "POST" && request.url === "/api/auth/forgot-password") {
+			const body = await readBody(request);
+			const email = String(body.email || "").trim().toLowerCase();
+			if (!isValidEmail(email)) return send(response, 400, { error: "Enter a valid email address." });
+			const account = await pool.query(
+				`SELECT s.email FROM staff s WHERE s.email = $1 AND (s.role = 'admin' OR (s.role = 'staff' AND s.status = 'approved'))`,
+				[email],
+			);
+			const resetToken = account.rows[0] ? createResetToken() : null;
+			if (resetToken) {
+				await pool.query(
+					`INSERT INTO password_reset_tokens (email, token_hash, expires_at)
+					 VALUES ($1, $2, $3)
+					 ON CONFLICT (email) DO UPDATE SET token_hash = EXCLUDED.token_hash, expires_at = EXCLUDED.expires_at, created_at = NOW()`,
+					[email, hashResetToken(resetToken), new Date(Date.now() + 30 * 60 * 1000).toISOString()],
+				);
+			}
+			const responseBody = { message: "If the account is eligible, password recovery is available." };
+			if (resetToken && process.env.NODE_ENV !== "production") responseBody.resetToken = resetToken;
+			if (process.env.NODE_ENV === "production") responseBody.message = "Password recovery email delivery is not configured. Contact your administrator.";
+			return send(response, 200, responseBody);
+		}
+
+		if (request.method === "POST" && request.url === "/api/auth/reset-password") {
+			const body = await readBody(request);
+			const email = String(body.email || "").trim().toLowerCase();
+			const token = String(body.token || "").trim();
+			if (!isValidEmail(email) || token.length < 32 || !isValidPassword(body.password)) {
+				return send(response, 400, { error: "Provide a valid email, reset token, and password of at least 12 characters." });
+			}
+			const updated = await consumePasswordReset(email, hashResetToken(token), hashPassword(body.password));
+			return updated
+				? send(response, 200, { message: "Password reset successfully. You can now sign in." })
+				: send(response, 400, { error: "This reset token is invalid, expired, or already used." });
 		}
 
 		if (request.method === "POST" && request.url === "/api/auth/login") {
 			const body = await readBody(request);
+			const email = String(body.email || "").trim().toLowerCase();
 			if (body.role === "admin") {
-				const valid = body.email?.toLowerCase() === process.env.ADMIN_EMAIL?.toLowerCase()
-					&& body.password === process.env.ADMIN_PASSWORD
-					&& body.token === process.env.ADMIN_TOKEN;
+				const admin = await pool.query("SELECT password_hash FROM staff WHERE email = $1 AND role = 'admin' AND status = 'approved'", [email]);
+				const valid = email === process.env.ADMIN_EMAIL?.trim().toLowerCase()
+					&& body.token === process.env.ADMIN_TOKEN
+					&& admin.rows[0] && verifyPassword(body.password, admin.rows[0].password_hash);
 				if (!valid) {
-					const staffAccount = await pool.query("SELECT 1 FROM staff WHERE email = $1 AND role = 'staff' AND status = 'approved'", [body.email?.toLowerCase()]);
+					const staffAccount = await pool.query("SELECT 1 FROM staff WHERE email = $1 AND role = 'staff' AND status = 'approved'", [email]);
 					if (staffAccount.rows[0]) return send(response, 403, { error: "This email belongs to an approved staff account. Select Staff access to sign in." });
 				}
-				return valid ? send(response, 200, { role: "admin", email: process.env.ADMIN_EMAIL }) : send(response, 401, { error: "Invalid administrator credentials." });
+				return valid ? send(response, 200, { role: "admin", email }) : send(response, 401, { error: "Invalid administrator credentials." });
 			}
-			const staff = await pool.query(`${staffQuery} WHERE s.email = $1 AND s.role = 'staff' AND s.status = 'approved'`, [body.email?.toLowerCase()]);
-			return staff.rows[0] ? send(response, 200, { role: "staff", name: staff.rows[0].name, email: staff.rows[0].email, clinic: staff.rows[0].clinic }) : send(response, 401, { error: "This staff account is not approved." });
+			const credentials = await pool.query("SELECT password_hash FROM staff WHERE email = $1 AND role = 'staff' AND status = 'approved'", [email]);
+			if (credentials.rows[0]?.password_hash === "managed-by-portal") {
+				return send(response, 409, { error: "This approved account needs a password set. Use Forgot password to create one." });
+			}
+			if (!credentials.rows[0] || !verifyPassword(body.password, credentials.rows[0].password_hash)) return send(response, 401, { error: "Invalid credentials or this staff account is not approved." });
+			const staff = await pool.query(`${staffQuery} WHERE s.email = $1 AND s.role = 'staff' AND s.status = 'approved'`, [email]);
+			return send(response, 200, { role: "staff", name: staff.rows[0].name, email: staff.rows[0].email, clinic: staff.rows[0].clinic });
 		}
 
 		if (request.method === "POST" && request.url === "/api/staff") {
 			const body = await readBody(request);
 			const clinic = await pool.query("SELECT id FROM clinics WHERE name = $1", [body.clinic]);
-			if (!body.name || !body.email || !clinic.rows[0]) return send(response, 400, { error: "Name, email, and a valid clinic are required." });
+			if (!body.name || !clinic.rows[0] || !isValidPassword(body.password)) return send(response, 400, { error: "Name, a valid clinic, and a password of at least 12 characters are required." });
 			const email = String(body.email).trim().toLowerCase();
+			if (!isValidEmail(email)) return send(response, 400, { error: "Enter a valid email address." });
 			const duplicate = await pool.query("SELECT 1 FROM staff WHERE email = $1", [email]);
 			if (duplicate.rows[0]) return send(response, 409, { error: "A staff account with this email already exists." });
 			const result = await pool.query(
 				`INSERT INTO staff (name, email, password_hash, role, clinic_id, status)
 				 VALUES ($1, $2, $3, 'staff', $4, $5)
 				 RETURNING id`,
-				[body.name, email, "managed-by-portal", clinic.rows[0].id, body.status || "pending"],
+				[body.name, email, hashPassword(body.password), clinic.rows[0].id, "pending"],
 			);
 			const staff = await pool.query(`${staffQuery} WHERE s.id = $1`, [result.rows[0].id]);
 			return send(response, 201, staff.rows[0]);

@@ -25,8 +25,6 @@ npm run dev
 
 Open `http://localhost:3000`. The API runs on `http://localhost:3001` by default.
 
-For local demonstrations, set `DEMO_STOCK_DATA=true` in `server/.env`. The public portal labels sample inventory as demo data; it is generated for the public-data response only, is never saved, and is disabled when `NODE_ENV=production`. Do not use demo availability to make care or travel decisions.
-
 ## Verification
 
 ```powershell
