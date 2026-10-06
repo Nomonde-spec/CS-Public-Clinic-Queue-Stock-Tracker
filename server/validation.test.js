@@ -2,7 +2,7 @@ const { allocateTicket, callTicket, canServeTicket, deriveQueue, expireTickets, 
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const { getAvailability, parseStockCount, calculateStockMovement, isAllowedClinicStatus } = require('./validation');
-const { hashPassword, verifyPassword } = require('./password');
+const { hashPassword, verifyPassword, isValidPassword } = require('./password');
 const { defaultMedications, createClinicInventory, setClinicMedicationStock } = require('./medication-catalog');
 
 test('the medication catalog seeds at least 60 unique entries for every clinic', () => {
@@ -170,4 +170,10 @@ test('password reset hashes and verifies credentials safely', () => {
   assert.equal(verifyPassword(password, hash), true);
   assert.equal(verifyPassword('wrong-password', hash), false);
   assert.equal(verifyPassword('any-password', 'managed-by-portal'), false);
+});
+
+test('password policy accepts six characters and rejects shorter values', () => {
+  assert.equal(isValidPassword('12345'), false);
+  assert.equal(isValidPassword('123456'), true);
+  assert.equal(isValidPassword('x'.repeat(257)), false);
 });

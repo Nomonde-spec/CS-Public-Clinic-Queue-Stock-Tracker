@@ -4,6 +4,7 @@ const { Pool } = require("pg");
 const { getAvailability, parseStockCount, calculateStockMovement, isAllowedClinicStatus } = require("./validation");
 const { hashPassword, verifyPassword, createResetToken, hashResetToken, isValidPassword } = require("./password");
 const { defaultMedications, createClinicInventory, setClinicMedicationStock } = require("./medication-catalog");
+const { getPasswordResetEmailConfig, sendPasswordResetEmail } = require("./password-reset-email");
 
 const port = Number(process.env.PORT) || 3000;
 const defaultClinics = [
@@ -976,22 +977,35 @@ async function handleRequest(request, response) {
 			const body = await readBody(request);
 			const email = String(body.email || "").trim().toLowerCase();
 			if (!isValidEmail(email)) return send(response, 400, { error: "Enter a valid email address." });
+			const responseMessage = "If this address is associated with an active account and email delivery is available, password reset instructions can be sent. If none arrive, contact an administrator.";
+			if (process.env.NODE_ENV === "production" && !getPasswordResetEmailConfig()) {
+				return send(response, 503, { error: "Password recovery is temporarily unavailable. Contact an administrator." });
+			}
 			const account = await pool.query(
-				`SELECT s.email FROM staff s WHERE s.email = $1 AND (s.role = 'admin' OR (s.role = 'staff' AND s.status = 'approved'))`,
+				`SELECT s.email, s.role FROM staff s WHERE s.email = $1 AND (s.role = 'admin' OR (s.role = 'staff' AND s.status = 'approved'))`,
 				[email],
 			);
 			const resetToken = account.rows[0] ? createResetToken() : null;
 			if (resetToken) {
+				const tokenHash = hashResetToken(resetToken);
 				await pool.query(
 					`INSERT INTO password_reset_tokens (email, token_hash, expires_at)
 					 VALUES ($1, $2, $3)
 					 ON CONFLICT (email) DO UPDATE SET token_hash = EXCLUDED.token_hash, expires_at = EXCLUDED.expires_at, created_at = NOW()`,
-					[email, hashResetToken(resetToken), new Date(Date.now() + 30 * 60 * 1000).toISOString()],
+					[email, tokenHash, new Date(Date.now() + 30 * 60 * 1000).toISOString()],
 				);
+				if (process.env.NODE_ENV === "production") {
+					try {
+						await sendPasswordResetEmail({ email, token: resetToken, role: account.rows[0].role });
+					} catch {
+						await pool.query("DELETE FROM password_reset_tokens WHERE email = $1 AND token_hash = $2", [email, tokenHash]);
+						console.error("Password reset email delivery failed.");
+						return send(response, 503, { error: "Password recovery is temporarily unavailable. Please try again later or contact an administrator." });
+					}
+				}
 			}
-			const responseBody = { message: "If the account is eligible, password recovery is available." };
+			const responseBody = { message: responseMessage };
 			if (resetToken && process.env.NODE_ENV !== "production") responseBody.resetToken = resetToken;
-			if (process.env.NODE_ENV === "production") responseBody.message = "Password recovery email delivery is not configured. Contact your administrator.";
 			return send(response, 200, responseBody);
 		}
 
@@ -1000,7 +1014,7 @@ async function handleRequest(request, response) {
 			const email = String(body.email || "").trim().toLowerCase();
 			const token = String(body.token || "").trim();
 			if (!isValidEmail(email) || token.length < 32 || !isValidPassword(body.password)) {
-				return send(response, 400, { error: "Provide a valid email, reset token, and password of at least 12 characters." });
+				return send(response, 400, { error: "Provide a valid email, reset token, and password of at least 6 characters." });
 			}
 			const updated = await consumePasswordReset(email, hashResetToken(token), hashPassword(body.password));
 			return updated
@@ -1034,7 +1048,7 @@ async function handleRequest(request, response) {
 		if (request.method === "POST" && request.url === "/api/staff") {
 			const body = await readBody(request);
 			const clinic = await pool.query("SELECT id FROM clinics WHERE name = $1", [body.clinic]);
-			if (!body.name || !clinic.rows[0] || !isValidPassword(body.password)) return send(response, 400, { error: "Name, a valid clinic, and a password of at least 12 characters are required." });
+			if (!body.name || !clinic.rows[0] || !isValidPassword(body.password)) return send(response, 400, { error: "Name, a valid clinic, and a password of at least 6 characters are required." });
 			const email = String(body.email).trim().toLowerCase();
 			if (!isValidEmail(email)) return send(response, 400, { error: "Enter a valid email address." });
 			const duplicate = await pool.query("SELECT 1 FROM staff WHERE email = $1", [email]);

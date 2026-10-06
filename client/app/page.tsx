@@ -257,40 +257,53 @@ function Auth({ onLogin, onRegister, onPublic, message }: { onLogin: (role: Role
   const [mode, setMode] = useState<"signin" | "register" | "forgot" | "reset">("signin");
   const [submitted, setSubmitted] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
+  const [email, setEmail] = useState("");
   const [resetEmail, setResetEmail] = useState("");
   const [resetToken, setResetToken] = useState("");
   const [recoveryMessage, setRecoveryMessage] = useState("");
+
+  useEffect(() => {
+    const resetParams = new URLSearchParams(window.location.hash.slice(1));
+    const email = resetParams.get("resetEmail");
+    const token = resetParams.get("resetToken");
+    if (!email || !token) return;
+    setRole(resetParams.get("resetRole") === "admin" ? "admin" : "staff");
+    setResetEmail(email);
+    setResetToken(token);
+    setMode("reset");
+    window.history.replaceState(null, "", window.location.pathname);
+  }, []);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (submitted) return;
     const values = new FormData(event.currentTarget);
-    const email = String(values.get("email") || "").trim().toLowerCase();
+    const submittedEmail = (mode === "reset" ? resetEmail : String(values.get("email") || "")).trim().toLowerCase();
     const password = String(values.get("password") || "");
     const token = String(values.get("token") || "").trim();
     setSubmitted(true);
     setRecoveryMessage("");
     try {
       if (mode === "forgot") {
-        const response = await fetch(`${apiUrl}/api/auth/forgot-password`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ email }) });
+        const response = await fetch(`${apiUrl}/api/auth/forgot-password`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ email: submittedEmail }) });
         const result = await response.json() as { error?: string; message?: string; resetToken?: string };
         if (!response.ok) throw new Error(result.error || "Password recovery could not be started.");
-        setResetEmail(email);
+        setResetEmail(submittedEmail);
         setResetToken(result.resetToken || "");
         setRecoveryMessage(result.message || "Check your recovery instructions.");
       } else if (mode === "reset") {
-        const response = await fetch(`${apiUrl}/api/auth/reset-password`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ email, token, password }) });
+        const response = await fetch(`${apiUrl}/api/auth/reset-password`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ email: submittedEmail, token, password }) });
         const result = await response.json() as { error?: string; message?: string };
         if (!response.ok) throw new Error(result.error || "Password could not be reset.");
         setResetToken("");
         setMode("signin");
         setRecoveryMessage(result.message || "Password reset successfully. You can now sign in.");
       } else if (mode === "register") {
-        await onRegister({ name: String(values.get("name") || "").trim(), email, clinic: String(values.get("clinic") || "") }, password);
+        await onRegister({ name: String(values.get("name") || "").trim(), email: submittedEmail, clinic: String(values.get("clinic") || "") }, password);
         setMode("signin");
       } else {
         if (role === "admin" && !/^\d{6}$/.test(token)) throw new Error("Enter the 6-digit administrator security token.");
-        await onLogin(role, email, password, token);
+        await onLogin(role, submittedEmail, password, token);
       }
     } catch (error) {
       setRecoveryMessage(error instanceof Error ? error.message : "The request failed. Please try again.");
@@ -308,11 +321,11 @@ function Auth({ onLogin, onRegister, onPublic, message }: { onLogin: (role: Role
     {role === "staff" && !recoveryMode && <div className="auth-mode"><button type="button" className={mode === "signin" ? "selected" : ""} onClick={() => setMode("signin")}>Sign in</button><button type="button" className={mode === "register" ? "selected" : ""} onClick={() => setMode("register")}>Register</button></div>}
     <h2>{heading}</h2><p>{description}</p>{(recoveryMessage || message) && <div className="auth-message">{recoveryMessage || message}</div>}
     {mode === "register" && <><label>Full name<input name="name" required placeholder="e.g. Sarah Jenkins" /></label><label>Assigned clinic<select name="clinic" defaultValue=""><option value="" disabled>Select your clinic</option>{clinics.map((clinic) => <option key={clinic.name}>{clinic.name}</option>)}</select></label></>}
-    <label>{role === "admin" ? "Administrator email" : "Clinical email"}<input name="email" type="email" required defaultValue={mode === "reset" ? resetEmail : undefined} autoComplete="email" placeholder={role === "admin" ? "e.g. sys.admin@carequeue.gov" : "s.jenkins@metrocare.gov"} /></label>
+    <label>{role === "admin" ? "Administrator email" : "Clinical email"}<input name="email" type="email" required value={mode === "reset" ? resetEmail : email} onChange={(event) => mode === "reset" ? setResetEmail(event.target.value) : setEmail(event.target.value)} autoComplete="email" placeholder={role === "admin" ? "e.g. sys.admin@carequeue.gov" : "s.jenkins@metrocare.gov"} /></label>
     {mode === "forgot" && <button className="primary-button" disabled={submitted}>{submitted ? "Requesting token..." : "Request reset token"}</button>}
     {resetToken && mode === "forgot" && <div className="reset-token"><strong>Local reset token</strong><code>{resetToken}</code><button type="button" className="text-link" onClick={() => { setMode("reset"); setRecoveryMessage(""); }}>Continue to password reset</button></div>}
-    {mode === "reset" && <><label>Reset token<input name="token" required minLength={32} defaultValue={resetToken} autoComplete="one-time-code" /></label><label>New password<div className="password-wrapper"><input name="password" required minLength={12} type={showPassword ? "text" : "password"} autoComplete="new-password" /><button type="button" className="password-toggle" onClick={() => setShowPassword((value) => !value)} aria-label={showPassword ? "Hide password" : "Show password"}>{showPassword ? "Hide" : "Show"}</button></div></label><button className="primary-button" disabled={submitted}>{submitted ? "Resetting password..." : "Set new password"}</button></>}
-    {(mode === "signin" || mode === "register") && <><label>{mode === "register" ? "Create password" : "Secure password"}<div className="password-wrapper"><input name="password" required minLength={mode === "register" ? 12 : undefined} type={showPassword ? "text" : "password"} autoComplete={mode === "register" ? "new-password" : "current-password"} placeholder={mode === "register" ? "At least 12 characters" : "Enter your password"} /><button type="button" className="password-toggle" onClick={() => setShowPassword((value) => !value)} aria-label={showPassword ? "Hide password" : "Show password"}>{showPassword ? "Hide" : "Show"}</button></div></label>{role === "admin" && <label>Security key token<input name="token" required placeholder="6-digit verification code" /></label>}{mode === "signin" && <div className="auth-links"><button type="button" className="text-link" onClick={() => { setMode("forgot"); setRecoveryMessage(""); }}>Forgot password?</button></div>}<button className="primary-button" disabled={submitted}>{submitted ? mode === "register" ? "Submitting..." : "Authenticating..." : mode === "register" ? "Submit for admin approval" : "Authorize & sign in"}</button></>}
+    {mode === "reset" && <><label>Reset token<input name="token" required minLength={32} defaultValue={resetToken} autoComplete="one-time-code" /></label><label>New password<div className="password-wrapper"><input name="password" required minLength={6} type={showPassword ? "text" : "password"} autoComplete="new-password" /><button type="button" className="password-toggle" onClick={() => setShowPassword((value) => !value)} aria-label={showPassword ? "Hide password" : "Show password"}>{showPassword ? "Hide" : "Show"}</button></div></label><button className="primary-button" disabled={submitted}>{submitted ? "Resetting password..." : "Set new password"}</button></>}
+    {(mode === "signin" || mode === "register") && <><label>{mode === "register" ? "Create password" : "Secure password"}<div className="password-wrapper"><input name="password" required minLength={mode === "register" ? 6 : undefined} type={showPassword ? "text" : "password"} autoComplete={mode === "register" ? "new-password" : "current-password"} placeholder={mode === "register" ? "At least 6 characters" : "Enter your password"} /><button type="button" className="password-toggle" onClick={() => setShowPassword((value) => !value)} aria-label={showPassword ? "Hide password" : "Show password"}>{showPassword ? "Hide" : "Show"}</button></div></label>{role === "admin" && <label>Security key token<input name="token" required placeholder="6-digit verification code" /></label>}{mode === "signin" && <div className="auth-links"><button type="button" className="text-link" onClick={() => { setMode("forgot"); setRecoveryMessage(""); }}>Forgot password?</button></div>}<button className="primary-button" disabled={submitted}>{submitted ? mode === "register" ? "Submitting..." : "Authenticating..." : mode === "register" ? "Submit for admin approval" : "Authorize & sign in"}</button></>}
     {recoveryMode && <button type="button" className="text-link recovery-back" disabled={submitted} onClick={() => { setMode("signin"); setRecoveryMessage(""); }}>Back to sign in</button>}
     {mode !== "forgot" && mode !== "reset" && <div className="auth-foot">Staff registrations remain pending until an admin approves them.</div>}
   </form></main>;
@@ -541,6 +554,8 @@ export default function Home() {
   const [systemSummary, setSystemSummary] = useState<SystemSummary>({ activeClinics: clinics.length, totalStaff: initialApprovedStaff.filter((staff) => staff.role === "staff").length, pendingApprovals: 0 });
   const [authMessage, setAuthMessage] = useState("");
   useEffect(() => {
+    const resetParams = new URLSearchParams(window.location.hash.slice(1));
+    if (resetParams.has("resetEmail") && resetParams.has("resetToken")) setView("login");
     const loadPublicData = () => fetch(`${apiUrl}/api/public-data`).then((response) => response.ok ? response.json() : Promise.reject()).then((data: { clinics: Clinic[]; medications: Medication[] }) => {
       clinics = data.clinics.map((clinic) => ({ ...clinic, distance: clinics.find((current) => current.name === clinic.name)?.distance ?? 0 }));
       medications = data.medications;

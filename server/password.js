@@ -32,7 +32,7 @@ function hashResetToken(token) {
 }
 
 function isValidPassword(password) {
-	return typeof password === "string" && password.length >= 12 && password.length <= 256;
+	return typeof password === "string" && password.length >= 6 && password.length <= 256;
 }
 
 module.exports = { hashPassword, verifyPassword, createResetToken, hashResetToken, isValidPassword };
