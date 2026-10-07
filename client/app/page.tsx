@@ -269,7 +269,10 @@ let medications: Medication[] = [
   },
 ];
 
-const apiUrl = (process.env.NEXT_PUBLIC_API_URL || "").replace(/\/+$/, "");
+const apiUrl = (
+  process.env.NEXT_PUBLIC_API_URL ||
+  (typeof window !== "undefined" ? window.location.origin : "")
+).replace(/\/+$/, "");
 type ApiStaff = StaffRegistration & {
   status: "pending" | "approved" | "rejected";
 };

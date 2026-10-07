@@ -15,6 +15,8 @@ test("SMTP config requires delivery settings and a public app URL", () => {
 	assert.equal(getPasswordResetEmailConfig({}), null);
 	assert.equal(getPasswordResetEmailConfig(smtpEnv).transport.secure, false);
 	assert.equal(getPasswordResetEmailConfig({ ...smtpEnv, SMTP_PORT: "465" }).transport.secure, true);
+	assert.equal(getPasswordResetEmailConfig({ ...smtpEnv, SMTP_PASSWORD: "   " }), null);
+	assert.equal(getPasswordResetEmailConfig({ ...smtpEnv, SMTP_SECURE: true }).transport.secure, true);
 });
 
 test("password reset URL keeps its token in the fragment", () => {

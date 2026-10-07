@@ -1,27 +1,40 @@
 const nodemailer = require("nodemailer");
 
+function readBooleanEnv(value) {
+	if (typeof value === "boolean") return value;
+	if (typeof value === "string") {
+		const normalized = value.trim().toLowerCase();
+		if (["true", "1", "yes", "y", "on"].includes(normalized)) return true;
+		if (["false", "0", "no", "n", "off", ""].includes(normalized)) return false;
+	}
+	return undefined;
+}
+
 function getPasswordResetEmailConfig(env = process.env) {
-	const host = env.SMTP_HOST?.trim();
-	const from = env.SMTP_FROM?.trim();
-	const publicAppUrl = (env.PUBLIC_APP_URL || env.CLIENT_ORIGIN || "").split(",")[0].trim();
+	const host = String(env.SMTP_HOST || "").trim();
+	const from = String(env.SMTP_FROM || "").trim();
+	const publicAppUrl = String(env.PUBLIC_APP_URL || env.CLIENT_ORIGIN || "").split(",")[0].trim();
 	const port = Number(env.SMTP_PORT || 587);
-	const username = env.SMTP_USER?.trim();
-	const password = env.SMTP_PASSWORD;
-	if (!host || !from || !publicAppUrl || !Number.isInteger(port) || port < 1 || port > 65535 || Boolean(username) !== Boolean(password)) return null;
+	const username = String(env.SMTP_USER || "").trim();
+	const password = String(env.SMTP_PASSWORD || "").trim();
+	const hasUsername = Boolean(username);
+	const hasPassword = Boolean(password);
+	if (!host || !from || !publicAppUrl || !Number.isInteger(port) || port < 1 || port > 65535 || hasUsername !== hasPassword) return null;
 	try {
 		const parsedUrl = new URL(publicAppUrl);
-		if (!['http:', 'https:'].includes(parsedUrl.protocol)) return null;
+		if (!["http:", "https:"].includes(parsedUrl.protocol)) return null;
 	} catch {
 		return null;
 	}
+	const secure = readBooleanEnv(env.SMTP_SECURE);
 	return {
 		from,
 		publicAppUrl,
 		transport: {
 			host,
 			port,
-			secure: env.SMTP_SECURE === undefined ? port === 465 : env.SMTP_SECURE.toLowerCase() === "true",
-			...(username && password ? { auth: { user: username, pass: password } } : {}),
+			secure: secure === undefined ? port === 465 : secure,
+			...(hasUsername && hasPassword ? { auth: { user: username, pass: password } } : {}),
 		},
 	};
 }
