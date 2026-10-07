@@ -1066,7 +1066,7 @@ async function handleRequest(request, response) {
 				if (process.env.NODE_ENV === "production") {
 					try {
 						await sendPasswordResetEmail({ email, token: resetToken, role: account.rows[0].role });
-					} catch {
+					} catch (error) {
 						await pool.query("DELETE FROM password_reset_tokens WHERE email = $1 AND token_hash = $2", [email, tokenHash]);
 						console.error("Password reset email delivery failed.");
 						return send(response, 503, { error: "Password recovery is temporarily unavailable. Please try again later or contact an administrator." });
@@ -1147,9 +1147,10 @@ async function handleRequest(request, response) {
 				if (invitationEmailConfigured) {
 					try {
 						await sendStaffInvitationEmail({ email, name: body.name, clinic: body.clinic, role, temporaryPassword, token: resetToken });
-					} catch {
+					} catch (error) {
 						await pool.query("DELETE FROM password_reset_tokens WHERE email = $1 AND token_hash = $2", [email, tokenHash]);
 						await pool.query("DELETE FROM staff WHERE id = $1", [result.rows[0].id]);
+						console.error("Staff invitation email failed.", { code: error?.code, responseCode: error?.responseCode });
 						return send(response, 503, { error: "Staff invitation email could not be sent." });
 					}
 				}
