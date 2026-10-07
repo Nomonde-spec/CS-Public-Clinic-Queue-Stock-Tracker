@@ -1,6 +1,7 @@
 ﻿"use client";
 
 import { FormEvent, useEffect, useState } from "react";
+import { dedupeStaffList } from "../lib/staff";
 
 type View =
   | "home"
@@ -2584,7 +2585,7 @@ function AdminStaff({
   onUpdateStaff: (id: string, update: StaffUpdate) => Promise<void>;
   onDeleteStaff: (id: string) => Promise<void>;
 }) {
-  const staff = [...approvedStaff, ...pendingStaff];
+  const staff = dedupeStaffList([...approvedStaff, ...pendingStaff]);
   const [showCreate, setShowCreate] = useState(false);
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
@@ -3338,13 +3339,14 @@ export default function Home() {
       fetch(`${apiUrl}/api/staff`)
         .then((response) => (response.ok ? response.json() : Promise.reject()))
         .then((records: ApiStaff[]) => {
+          const uniqueRecords = dedupeStaffList(records);
           setApprovedStaff(
-            records
+            uniqueRecords
               .filter((staff) => staff.status === "approved")
               .map(toStaffRegistration),
           );
           setPendingStaff(
-            records
+            uniqueRecords
               .filter((staff) => staff.status === "pending")
               .map(toStaffRegistration),
           );
