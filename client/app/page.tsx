@@ -561,12 +561,27 @@ function PublicHome({
       medications.map((medication) => [medication.name, medication]),
     ).values(),
   );
-  const visibleClinics = selectedClinic
+  const clinicSelection = selectedClinic
     ? clinics.filter(
         (clinic) =>
           clinic.name === selectedClinic || clinic.district === selectedClinic,
       )
-    : clinics.slice(0, 3);
+    : selectedMedication
+      ? clinics
+      : clinics.slice(0, 3);
+  const clinicsWithMedicationStock = new Set(
+    medications
+      .filter(
+        (medication) =>
+          medication.name === selectedMedication &&
+          Boolean(medication.clinicName) &&
+          medication.stockCount > 0,
+      )
+      .map((medication) => medication.clinicName as string),
+  );
+  const visibleClinics = selectedMedication
+    ? clinicSelection.filter((clinic) => clinicsWithMedicationStock.has(clinic.name))
+    : clinicSelection;
   return (
     <main className="public-main">
       <section className="hero">
@@ -663,6 +678,11 @@ function PublicHome({
           </button>
         ))}
       </div>
+      {selectedMedication && visibleClinics.length === 0 && (
+        <p className="empty">
+          No clinics currently report this medication in stock.
+        </p>
+      )}
       <section className="stock-section">
         <div className="section-heading">
           <div>
@@ -1225,6 +1245,7 @@ function Auth({
   onLogin,
   onRegister,
   onPublic,
+  onBack,
   message,
 }: {
   onLogin: (
@@ -1238,6 +1259,7 @@ function Auth({
     password: string,
   ) => Promise<void>;
   onPublic: () => void;
+  onBack: () => void;
   message: string;
 }) {
   const [role, setRole] = useState<Role>("staff");
@@ -1380,9 +1402,21 @@ function Auth({
           <button type="button" onClick={onPublic}>
             Return to the public portal
           </button>
+          <button type="button" onClick={onBack}>
+            Back to previous page
+          </button>
         </div>
       </div>
-      <form className="auth-card" onSubmit={submit}>
+      <form
+        className="auth-card"
+        onSubmit={submit}
+        onKeyDown={(event) => {
+          if (event.key === "Enter" && !submitted) {
+            event.preventDefault();
+            event.currentTarget.requestSubmit();
+          }
+        }}
+      >
         {!recoveryMode && (
           <div className="role-switch">
             <button
@@ -1472,7 +1506,7 @@ function Auth({
           />
         </label>
         {mode === "forgot" && (
-          <button className="primary-button" disabled={submitted}>
+          <button type="submit" className="primary-button" disabled={submitted}>
             {submitted ? "Requesting token..." : "Request reset token"}
           </button>
         )}
@@ -1524,7 +1558,7 @@ function Auth({
                 </button>
               </div>
             </label>
-            <button className="primary-button" disabled={submitted}>
+            <button type="submit" className="primary-button" disabled={submitted}>
               {submitted ? "Resetting password..." : "Set new password"}
             </button>
           </>
@@ -1582,7 +1616,7 @@ function Auth({
                 </button>
               </div>
             )}
-            <button className="primary-button" disabled={submitted}>
+            <button type="submit" className="primary-button" disabled={submitted}>
               {submitted
                 ? mode === "register"
                   ? "Submitting..."
@@ -3249,6 +3283,7 @@ function Portal({
 
 export default function Home() {
   const [view, setView] = useState<View>("home");
+  const [previousView, setPreviousView] = useState<View>("home");
   const [selectedClinic, setSelectedClinic] = useState<Clinic | null>(null);
   const [role, setRole] = useState<Role>("public");
   const [staffName, setStaffName] = useState("Staff member");
@@ -3269,6 +3304,19 @@ export default function Home() {
   });
   const [authMessage, setAuthMessage] = useState("");
   useEffect(() => {
+    if (!window.history.state?.careQueueView) {
+      window.history.replaceState(
+        { ...window.history.state, careQueueView: "home" },
+        "",
+        window.location.href,
+      );
+    }
+    const handleBrowserBack = (event: PopStateEvent) => {
+      const nextView = event.state?.careQueueView as View | undefined;
+      setView(nextView || "home");
+      setSelectedClinic(null);
+    };
+    window.addEventListener("popstate", handleBrowserBack);
     const resetParams = new URLSearchParams(window.location.hash.slice(1));
     if (resetParams.has("resetEmail") && resetParams.has("resetToken"))
       setView("login");
@@ -3323,15 +3371,36 @@ export default function Home() {
     const staffTimer = window.setInterval(loadStaff, 10000);
     const summaryTimer = window.setInterval(loadSummary, 10000);
     return () => {
+      window.removeEventListener("popstate", handleBrowserBack);
       window.clearInterval(publicDataTimer);
       window.clearInterval(staffTimer);
       window.clearInterval(summaryTimer);
     };
   }, []);
   const navigate = (nextView: View) => {
+    if (nextView !== view) setPreviousView(view);
+    window.history.pushState(
+      { ...window.history.state, careQueueView: nextView },
+      "",
+      window.location.href,
+    );
     setView(nextView);
     setSelectedClinic(null);
   };
+  useEffect(() => {
+    const handleKeyboardBack = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      const isEditable =
+        target?.matches("input, textarea, select, [contenteditable='true']") ??
+        false;
+      if (event.key === "Backspace" && !isEditable && view !== "home") {
+        event.preventDefault();
+        navigate(previousView);
+      }
+    };
+    window.addEventListener("keydown", handleKeyboardBack);
+    return () => window.removeEventListener("keydown", handleKeyboardBack);
+  }, [previousView, view]);
   const registerStaff = async (
     registration: Omit<StaffRegistration, "id">,
     password: string,
@@ -3650,6 +3719,7 @@ export default function Home() {
         onRegister={registerStaff}
         onLogin={login}
         onPublic={() => navigate("home")}
+        onBack={() => navigate(previousView)}
       />
     );
   return (
@@ -3660,6 +3730,12 @@ export default function Home() {
           onNavigate={navigate}
           onClinic={(clinic) => {
             setSelectedClinic(clinic);
+            setPreviousView(view);
+            window.history.pushState(
+              { ...window.history.state, careQueueView: "clinic" },
+              "",
+              window.location.href,
+            );
             setView("clinic");
           }}
         />
@@ -3668,6 +3744,12 @@ export default function Home() {
         <Clinics
           onClinic={(clinic) => {
             setSelectedClinic(clinic);
+            setPreviousView(view);
+            window.history.pushState(
+              { ...window.history.state, careQueueView: "clinic" },
+              "",
+              window.location.href,
+            );
             setView("clinic");
           }}
         />
