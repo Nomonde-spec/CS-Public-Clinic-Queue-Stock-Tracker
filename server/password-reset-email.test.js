@@ -1,6 +1,6 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { buildPasswordResetUrl, getPasswordResetEmailConfig, sendPasswordResetEmail } = require("./password-reset-email");
+const { buildPasswordResetUrl, getPasswordResetEmailConfig, sendPasswordResetEmail, sendStaffInvitationEmail } = require("./password-reset-email");
 
 const smtpEnv = {
 	SMTP_HOST: "smtp.example.test",
@@ -46,4 +46,22 @@ test("password reset mail sends the one-time link through the configured transpo
 
 test("password reset mail refuses missing SMTP configuration", async () => {
 	await assert.rejects(sendPasswordResetEmail({ email: "staff@example.test", token: "token", role: "staff", env: {} }), /not configured/);
+});
+
+test("staff invitation mail includes temporary credentials and setup link", async () => {
+	let sentMessage;
+	await sendStaffInvitationEmail({
+		email: "new.staff@example.test",
+		name: "New Staff",
+		clinic: "Metro Family Care Centre",
+		temporaryPassword: "temporary-password",
+		token: "one-time-token",
+		env: smtpEnv,
+		createTransport() {
+			return { async sendMail(message) { sentMessage = message; } };
+		},
+	});
+	assert.equal(sentMessage.to, "new.staff@example.test");
+	assert.match(sentMessage.text, /Temporary password: temporary-password/);
+	assert.match(sentMessage.text, /resetToken=one-time-token/);
 });

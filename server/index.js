@@ -4,7 +4,7 @@ const { Pool } = require("pg");
 const { getAvailability, parseStockCount, calculateStockMovement, isAllowedClinicStatus, isClinicOpenNow } = require("./validation");
 const { hashPassword, verifyPassword, createResetToken, hashResetToken, isValidPassword } = require("./password");
 const { defaultMedications, createClinicInventory, setClinicMedicationStock } = require("./medication-catalog");
-const { getPasswordResetEmailConfig, sendPasswordResetEmail } = require("./password-reset-email");
+const { getPasswordResetEmailConfig, sendPasswordResetEmail, sendStaffInvitationEmail } = require("./password-reset-email");
 
 const port = Number(process.env.PORT) || 3000;
 const defaultClinics = [
@@ -121,6 +121,10 @@ function createMemoryDb() {
 			if (text.startsWith("SELECT password_hash FROM staff WHERE email = $1 AND role = 'staff'")) {
 				const member = staff.find((item) => item.email.toLowerCase() === String(args[0]).toLowerCase() && item.role === "staff" && item.status === "approved");
 				return { rows: member ? [{ password_hash: member.password_hash }] : [] };
+			}
+			if (text.startsWith("SELECT 1 FROM password_reset_tokens WHERE email = $1")) {
+				const record = resetTokens.get(String(args[0]).toLowerCase());
+				return record && record.expires_at > new Date() ? { rows: [{ 1: 1 }] } : { rows: [] };
 			}
 			if (text.startsWith("UPDATE staff SET password_hash = $1")) {
 				const member = staff.find((item) => item.email.toLowerCase() === String(args[1]).toLowerCase() && (item.role === "admin" || (item.role === "staff" && item.status === "approved")));
@@ -957,6 +961,24 @@ async function handleRequest(request, response) {
 			}
 		}
 
+		if (request.method === "POST" && request.url === "/api/clinics") {
+			const body = await readBody(request);
+			const values = [body.name, body.province, body.district, body.address, body.hours, body.phone];
+			if (values.some((value) => !String(value || "").trim())) return send(response, 400, { error: "Clinic name, location, address, hours, and phone are required." });
+			try {
+				const result = await pool.query(
+					`INSERT INTO clinics (name, province, district, address, hours, phone, status, wait, patients, stock)
+					 VALUES ($1, $2, $3, $4, $5, $6, 'Open', 0, 0, 0)
+					 RETURNING name, province, district, address, hours, phone, wait, patients, stock, status, updated_at AS "updatedAt"`,
+					values,
+				);
+				return send(response, 201, result.rows[0]);
+			} catch (error) {
+				if (error.code === "23505") return send(response, 409, { error: "A clinic with this name already exists." });
+				throw error;
+			}
+		}
+
 		const clinicUpdateMatch = request.url.match(/^\/api\/clinics\/([^/]+)$/);
 		if (clinicUpdateMatch && request.method === "PATCH") {
 			const body = await readBody(request);
@@ -965,12 +987,19 @@ async function handleRequest(request, response) {
 				return send(response, 400, { error: "Invalid clinic status." });
 			}
 			const result = await pool.query(
-				"UPDATE clinics SET status = $1, updated_at = NOW() WHERE name = $2 RETURNING name, district, address, hours, wait, patients, stock, status, updated_at AS \"updatedAt\"",
-				[nextStatus, decodeURIComponent(clinicUpdateMatch[1])],
+				`UPDATE clinics SET status = $1, province = COALESCE($2, province), district = COALESCE($3, district), address = COALESCE($4, address), hours = COALESCE($5, hours), phone = COALESCE($6, phone), updated_at = NOW()
+				 WHERE name = $7 RETURNING name, province, district, address, hours, phone, wait, patients, stock, status, updated_at AS "updatedAt"`,
+				[nextStatus, body.province || null, body.district || null, body.address || null, body.hours || null, body.phone || null, decodeURIComponent(clinicUpdateMatch[1])],
 			);
 			if (!result.rows[0]) return send(response, 404, { error: "Clinic not found." });
 			const queue = await getClinicQueue(decodeURIComponent(clinicUpdateMatch[1]));
 			return send(response, 200, { ...result.rows[0], status: queue?.summary.status ?? "Open - Low Wait", patients: queue?.summary.patients ?? 0, wait: queue?.summary.wait ?? 0 });
+		}
+		if (clinicUpdateMatch && request.method === "DELETE") {
+			const name = decodeURIComponent(clinicUpdateMatch[1]);
+			await pool.query("DELETE FROM clinic_medications WHERE clinic_id = (SELECT id FROM clinics WHERE name = $1)", [name]);
+			const result = await pool.query("DELETE FROM clinics WHERE name = $1 RETURNING name", [name]);
+			return result.rows[0] ? send(response, 204, {}) : send(response, 404, { error: "Clinic not found." });
 		}
 
 		const medicationMovementMatch = request.url.match(/^\/api\/clinics\/([^/]+)\/medication-(dispenses|restocks)$/);
@@ -1065,10 +1094,11 @@ async function handleRequest(request, response) {
 		if (request.method === "POST" && request.url === "/api/auth/login") {
 			const body = await readBody(request);
 			const email = String(body.email || "").trim().toLowerCase();
-			if (body.role === "admin") {
+			const adminAccount = await pool.query("SELECT 1 FROM staff WHERE email = $1 AND role = 'admin' AND status = 'approved'", [email]);
+			const isAdminLogin = body.role === "admin" || email === process.env.ADMIN_EMAIL?.trim().toLowerCase() || adminAccount.rows[0];
+			if (isAdminLogin) {
 				const admin = await pool.query("SELECT password_hash FROM staff WHERE email = $1 AND role = 'admin' AND status = 'approved'", [email]);
-				const valid = email === process.env.ADMIN_EMAIL?.trim().toLowerCase()
-					&& body.token === process.env.ADMIN_TOKEN
+				const valid = body.token === process.env.ADMIN_TOKEN
 					&& admin.rows[0] && verifyPassword(body.password, admin.rows[0].password_hash);
 				if (!valid) {
 					const staffAccount = await pool.query("SELECT 1 FROM staff WHERE email = $1 AND role = 'staff' AND status = 'approved'", [email]);
@@ -1077,6 +1107,8 @@ async function handleRequest(request, response) {
 				return valid ? send(response, 200, { role: "admin", email }) : send(response, 401, { error: "Invalid administrator credentials." });
 			}
 			const credentials = await pool.query("SELECT password_hash FROM staff WHERE email = $1 AND role = 'staff' AND status = 'approved'", [email]);
+			const setupToken = await pool.query("SELECT 1 FROM password_reset_tokens WHERE email = $1 AND expires_at > NOW()", [email]);
+			if (setupToken.rows[0]) return send(response, 409, { error: "This account must use the emailed setup link to create a permanent password before signing in." });
 			if (credentials.rows[0]?.password_hash === "managed-by-portal") {
 				return send(response, 409, { error: "This approved account needs a password set. Use Forgot password to create one." });
 			}
@@ -1088,19 +1120,42 @@ async function handleRequest(request, response) {
 		if (request.method === "POST" && request.url === "/api/staff") {
 			const body = await readBody(request);
 			const clinic = await pool.query("SELECT id FROM clinics WHERE name = $1", [body.clinic]);
-			if (!body.name || !clinic.rows[0] || !isValidPassword(body.password)) return send(response, 400, { error: "Name, a valid clinic, and a password of at least 6 characters are required." });
+			const invitation = body.status === "approved";
+			const role = body.role === "admin" ? "admin" : "staff";
+			const temporaryPassword = String(body.password || "");
+			if (!body.name || !clinic.rows[0] || !isValidPassword(temporaryPassword)) return send(response, 400, { error: "Name, a valid clinic, and a password of at least 6 characters are required." });
+			const invitationEmailConfigured = Boolean(getPasswordResetEmailConfig());
+			if (invitation && process.env.NODE_ENV === "production" && !invitationEmailConfigured) return send(response, 503, { error: "Staff invitation email is not configured." });
 			const email = String(body.email).trim().toLowerCase();
 			if (!isValidEmail(email)) return send(response, 400, { error: "Enter a valid email address." });
 			const duplicate = await pool.query("SELECT 1 FROM staff WHERE email = $1", [email]);
 			if (duplicate.rows[0]) return send(response, 409, { error: "A staff account with this email already exists." });
 			const result = await pool.query(
 				`INSERT INTO staff (name, email, password_hash, role, clinic_id, status)
-				 VALUES ($1, $2, $3, 'staff', $4, $5)
+				 VALUES ($1, $2, $3, $4, $5, $6)
 				 RETURNING id`,
-				[body.name, email, hashPassword(body.password), clinic.rows[0].id, "pending"],
+				[body.name, email, hashPassword(temporaryPassword), role, clinic.rows[0].id, invitation ? "approved" : "pending"],
 			);
+			if (invitation) {
+				const resetToken = createResetToken();
+				const tokenHash = hashResetToken(resetToken);
+				await pool.query(
+					`INSERT INTO password_reset_tokens (email, token_hash, expires_at)
+					 VALUES ($1, $2, $3)`,
+					[email, tokenHash, new Date(Date.now() + 30 * 60 * 1000).toISOString()],
+				);
+				if (invitationEmailConfigured) {
+					try {
+						await sendStaffInvitationEmail({ email, name: body.name, clinic: body.clinic, role, temporaryPassword, token: resetToken });
+					} catch {
+						await pool.query("DELETE FROM password_reset_tokens WHERE email = $1 AND token_hash = $2", [email, tokenHash]);
+						await pool.query("DELETE FROM staff WHERE id = $1", [result.rows[0].id]);
+						return send(response, 503, { error: "Staff invitation email could not be sent." });
+					}
+				}
+			}
 			const staff = await pool.query(`${staffQuery} WHERE s.id = $1`, [result.rows[0].id]);
-			return send(response, 201, staff.rows[0]);
+			return send(response, 201, invitation && !invitationEmailConfigured ? { ...staff.rows[0], temporaryPassword } : staff.rows[0]);
 		}
 
 		const staffMatch = request.url.match(/^\/api\/staff\/([^/]+)$/);

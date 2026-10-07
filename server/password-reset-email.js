@@ -45,4 +45,17 @@ async function sendPasswordResetEmail({ email, token, role, env = process.env, c
 	});
 }
 
-module.exports = { buildPasswordResetUrl, getPasswordResetEmailConfig, sendPasswordResetEmail };
+async function sendStaffInvitationEmail({ email, name, clinic, role = "staff", temporaryPassword, token, env = process.env, createTransport = nodemailer.createTransport }) {
+	const config = getPasswordResetEmailConfig(env);
+	if (!config) throw new Error("SMTP staff invitation delivery is not configured.");
+	const resetUrl = buildPasswordResetUrl(config.publicAppUrl, email, token, role);
+	const transporter = createTransport(config.transport);
+	await transporter.sendMail({
+		from: config.from,
+		to: email,
+		subject: "Your CareQueue staff account",
+		text: `Hello ${name},\n\nAn administrator created your CareQueue ${role} account for ${clinic}.\n\nTemporary password: ${temporaryPassword}\n\nOpen this one-time link within 30 minutes to create your permanent password:\n\n${resetUrl}\n\nIf you did not expect this account, contact your clinic administrator.`,
+	});
+}
+
+module.exports = { buildPasswordResetUrl, getPasswordResetEmailConfig, sendPasswordResetEmail, sendStaffInvitationEmail };

@@ -83,6 +83,7 @@ type SystemSummary = {
   pendingApprovals: number;
 };
 type ClinicControlUpdate = Pick<Clinic, "status">;
+type ClinicAdminUpdate = Partial<Pick<Clinic, "province" | "district" | "address" | "hours" | "phone" | "status">>;
 type MedicationControlUpdate = Pick<Medication, "stockCount">;
 
 const initialApprovedStaff: StaffRegistration[] = [
@@ -332,10 +333,10 @@ function PublicHeader({
         </button>
       </nav>
       <div className="header-status">
-        <span className="dot" /> LIVE STATUS <small>No login required</small>
+        <span className="dot" /> LIVE STATUS <small>No login required for patients</small>
       </div>
       <button className="header-access" onClick={() => onNavigate("login")}>
-        Staff/Admin Login / Register
+        Login
       </button>
     </header>
   );
@@ -1243,7 +1244,6 @@ function ClinicDetails({
 
 function Auth({
   onLogin,
-  onRegister,
   onPublic,
   onBack,
   message,
@@ -1254,18 +1254,12 @@ function Auth({
     password: string,
     token: string,
   ) => Promise<void>;
-  onRegister: (
-    registration: Omit<StaffRegistration, "id">,
-    password: string,
-  ) => Promise<void>;
   onPublic: () => void;
   onBack: () => void;
   message: string;
 }) {
   const [role, setRole] = useState<Role>("staff");
-  const [mode, setMode] = useState<"signin" | "register" | "forgot" | "reset">(
-    "signin",
-  );
+  const [mode, setMode] = useState<"signin" | "forgot" | "reset">("signin");
   const [submitted, setSubmitted] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
   const [email, setEmail] = useState("");
@@ -1336,16 +1330,6 @@ function Auth({
         setRecoveryMessage(
           result.message || "Password reset successfully. You can now sign in.",
         );
-      } else if (mode === "register") {
-        await onRegister(
-          {
-            name: String(values.get("name") || "").trim(),
-            email: submittedEmail,
-            clinic: String(values.get("clinic") || ""),
-          },
-          password,
-        );
-        setMode("signin");
       } else {
         if (role === "admin" && !/^\d{6}$/.test(token))
           throw new Error("Enter the 6-digit administrator security token.");
@@ -1368,15 +1352,11 @@ function Auth({
       ? "Reset your password"
       : mode === "reset"
         ? "Choose a new password"
-        : mode === "register"
-          ? "Register as staff"
-          : role === "admin"
+        : role === "admin"
             ? "Admin sign in"
             : "Staff sign in";
   const description =
-    mode === "register"
-      ? "Your account must be approved by an administrator before access is granted."
-      : mode === "forgot"
+      mode === "forgot"
         ? "Enter the email address associated with your account."
         : mode === "reset"
           ? "Enter your recovery token and a new password."
@@ -1384,29 +1364,6 @@ function Auth({
 
   return (
     <main className="auth-main">
-      <div className="auth-copy">
-        <Logo staff={role === "staff"} />
-        <p className="eyebrow">SECURE ACCESS</p>
-        <h1>
-          {role === "admin"
-            ? "Configure regional health services."
-            : "Manage your clinic in real time."}
-        </h1>
-        <p>
-          Authorized {role === "admin" ? "administrators" : "clinical teams"}{" "}
-          can update queue conditions, medication stock, and operational details
-          for the public portal.
-        </p>
-        <div className="access-note">
-          <strong>Need public access?</strong>
-          <button type="button" onClick={onPublic}>
-            Return to the public portal
-          </button>
-          <button type="button" onClick={onBack}>
-            Back to previous page
-          </button>
-        </div>
-      </div>
       <form
         className="auth-card"
         onSubmit={submit}
@@ -1417,76 +1374,21 @@ function Auth({
           }
         }}
       >
-        {!recoveryMode && (
-          <div className="role-switch">
-            <button
-              type="button"
-              className={role === "staff" ? "selected" : ""}
-              onClick={() => {
-                setRole("staff");
-                setMode("signin");
-                setRecoveryMessage("");
-              }}
-            >
-              Staff access
-            </button>
-            <button
-              type="button"
-              className={role === "admin" ? "selected" : ""}
-              onClick={() => {
-                setRole("admin");
-                setMode("signin");
-                setRecoveryMessage("");
-              }}
-            >
-              Admin access
-            </button>
-          </div>
-        )}
-        {role === "staff" && !recoveryMode && (
-          <div className="auth-mode">
-            <button
-              type="button"
-              className={mode === "signin" ? "selected" : ""}
-              onClick={() => setMode("signin")}
-            >
-              Sign in
-            </button>
-            <button
-              type="button"
-              className={mode === "register" ? "selected" : ""}
-              onClick={() => setMode("register")}
-            >
-              Register
-            </button>
-          </div>
-        )}
-        <h2>{heading}</h2>
+        <div className="auth-navigation">
+          <button type="button" onClick={onPublic}>
+            Return to the public portal
+          </button>
+          <button type="button" onClick={onBack}>
+            Back to previous page
+          </button>
+        </div>
+        <h2>{recoveryMode ? heading : "Login"}</h2>
         <p>{description}</p>
         {(recoveryMessage || message) && (
           <div className="auth-message">{recoveryMessage || message}</div>
         )}
-        {mode === "register" && (
-          <>
-            <label>
-              Full name
-              <input name="name" required placeholder="e.g. Sarah Jenkins" />
-            </label>
-            <label>
-              Assigned clinic
-              <select name="clinic" defaultValue="">
-                <option value="" disabled>
-                  Select your clinic
-                </option>
-                {clinics.map((clinic) => (
-                  <option key={clinic.name}>{clinic.name}</option>
-                ))}
-              </select>
-            </label>
-          </>
-        )}
         <label>
-          {role === "admin" ? "Administrator email" : "Clinical email"}
+          {recoveryMode ? (role === "admin" ? "Administrator email" : "Clinical email") : "Email"}
           <input
             name="email"
             type="email"
@@ -1563,23 +1465,21 @@ function Auth({
             </button>
           </>
         )}
-        {(mode === "signin" || mode === "register") && (
+        {mode === "signin" && (
           <>
             <label>
-              {mode === "register" ? "Create password" : "Secure password"}
+              Secure password
               <div className="password-wrapper">
                 <input
                   name="password"
                   required
-                  minLength={mode === "register" ? 6 : undefined}
+                  minLength={6}
                   type={showPassword ? "text" : "password"}
                   autoComplete={
-                    mode === "register" ? "new-password" : "current-password"
+                    "current-password"
                   }
                   placeholder={
-                    mode === "register"
-                      ? "At least 6 characters"
-                      : "Enter your password"
+                    "Enter your password"
                   }
                 />
                 <button
@@ -1592,12 +1492,11 @@ function Auth({
                 </button>
               </div>
             </label>
-            {role === "admin" && (
+            {mode === "signin" && (
               <label>
-                Security key token
+                Admin security token (admins only)
                 <input
                   name="token"
-                  required
                   placeholder="6-digit verification code"
                 />
               </label>
@@ -1617,13 +1516,7 @@ function Auth({
               </div>
             )}
             <button type="submit" className="primary-button" disabled={submitted}>
-              {submitted
-                ? mode === "register"
-                  ? "Submitting..."
-                  : "Authenticating..."
-                : mode === "register"
-                  ? "Submit for admin approval"
-                  : "Authorize & sign in"}
+              {submitted ? "Authenticating..." : "Login"}
             </button>
           </>
         )}
@@ -1640,11 +1533,6 @@ function Auth({
             Back to sign in
           </button>
         )}
-        {mode !== "forgot" && mode !== "reset" && (
-          <div className="auth-foot">
-            Staff registrations remain pending until an admin approves them.
-          </div>
-        )}
       </form>
     </main>
   );
@@ -1652,14 +1540,22 @@ function Auth({
 
 function StaffCrudPanel({
   approvedStaff,
+  onCreateStaff,
   onUpdateStaff,
   onDeleteStaff,
 }: {
   approvedStaff: StaffRegistration[];
+  onCreateStaff: (staff: StaffUpdate & { role: "staff" | "admin"; password: string }) => Promise<{ temporaryPassword?: string }>;
   onUpdateStaff: (id: string, update: StaffUpdate) => void;
   onDeleteStaff: (id: string) => void;
 }) {
   const [selectedClinic, setSelectedClinic] = useState(clinics[0].name);
+  const [newName, setNewName] = useState("");
+  const [newEmail, setNewEmail] = useState("");
+  const [newRole, setNewRole] = useState<"staff" | "admin">("staff");
+  const [newPassword, setNewPassword] = useState("");
+  const [createMessage, setCreateMessage] = useState("");
+  const [creating, setCreating] = useState(false);
   const staff = approvedStaff.filter((member) => member.role === "staff");
   const filteredStaff = staff.filter(
     (member) => member.clinic === selectedClinic,
@@ -1673,6 +1569,22 @@ function StaffCrudPanel({
     const clinic = window.prompt("Assigned clinic", member.clinic)?.trim();
     if (name && email && clinic)
       onUpdateStaff(member.id, { name, email, clinic });
+  };
+  const create = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setCreating(true);
+    setCreateMessage("");
+    try {
+      const result = await onCreateStaff({ name: newName.trim(), email: newEmail.trim().toLowerCase(), clinic: selectedClinic, role: newRole, password: newPassword });
+      setNewName("");
+      setNewEmail("");
+      setNewPassword("");
+      setCreateMessage(result.temporaryPassword ? `Staff account created. Temporary password: ${result.temporaryPassword}` : "Staff account created and invitation email sent.");
+    } catch (error) {
+      setCreateMessage(error instanceof Error ? error.message : "Staff account could not be created.");
+    } finally {
+      setCreating(false);
+    }
   };
   return (
     <section className="portal-panel staff-crud-panel">
@@ -1692,6 +1604,14 @@ function StaffCrudPanel({
           ))}
         </select>
       </div>
+      <form className="staff-create-form" onSubmit={create}>
+        <input value={newName} onChange={(event) => setNewName(event.target.value)} placeholder="Full name" required />
+        <input value={newEmail} onChange={(event) => setNewEmail(event.target.value)} type="email" placeholder="Email" required />
+        <select value={newRole} onChange={(event) => setNewRole(event.target.value as "staff" | "admin")}><option value="staff">Staff</option><option value="admin">Administrator</option></select>
+        <input value={newPassword} onChange={(event) => setNewPassword(event.target.value)} type="password" minLength={6} placeholder="Temporary password" required />
+        <button className="primary-button" type="submit" disabled={creating}>{creating ? "Creating..." : "Create staff login"}</button>
+        {createMessage && <span className="queue-message">{createMessage}</span>}
+      </form>
       <div className="staff-crud-list">
         {filteredStaff.length === 0 ? (
           <div className="empty">No staff records for {selectedClinic}.</div>
@@ -2582,7 +2502,21 @@ function AdminDashboard({
   );
 }
 
-function AdminClinics({ clinicData }: { clinicData: Clinic[] }) {
+function AdminClinics({ clinicData, onCreateClinic, onUpdateClinic, onDeleteClinic }: { clinicData: Clinic[]; onCreateClinic: (clinic: Omit<Clinic, "id" | "distance" | "wait" | "patients" | "stock" | "status" | "updatedAt">) => Promise<void>; onUpdateClinic: (name: string, update: ClinicAdminUpdate) => Promise<void>; onDeleteClinic: (name: string) => Promise<void> }) {
+  const [showCreate, setShowCreate] = useState(false);
+  const [form, setForm] = useState({ name: "", province: "", district: "", address: "", hours: "", phone: "" });
+  const create = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    await onCreateClinic(form);
+    setForm({ name: "", province: "", district: "", address: "", hours: "", phone: "" });
+    setShowCreate(false);
+  };
+  const edit = async (clinic: Clinic) => {
+    const address = window.prompt("Clinic address", clinic.address)?.trim();
+    const hours = window.prompt("Operating hours", clinic.hours)?.trim();
+    const phone = window.prompt("Clinic phone", clinic.phone)?.trim();
+    if (address && hours && phone) await onUpdateClinic(clinic.name, { address, hours, phone });
+  };
   return (
     <main className="admin-page">
       <div className="admin-page-title">
@@ -2593,8 +2527,9 @@ function AdminClinics({ clinicData }: { clinicData: Clinic[] }) {
             hours, and live queue states.
           </p>
         </div>
-        <button className="primary-button">+ Add New Clinic Node</button>
+        <button className="primary-button" onClick={() => setShowCreate((value) => !value)}>{showCreate ? "Close" : "+ Add New Clinic Node"}</button>
       </div>
+      {showCreate && <form className="admin-filters" onSubmit={create}>{Object.entries(form).map(([key, value]) => <input key={key} value={value} onChange={(event) => setForm((current) => ({ ...current, [key]: event.target.value }))} placeholder={key[0].toUpperCase() + key.slice(1)} required />)}<button className="primary-button" type="submit">Create clinic</button></form>}
       <div className="admin-filters">
         <input placeholder="Filter clinics by name, district, or address..." />
         <select>
@@ -2624,7 +2559,7 @@ function AdminClinics({ clinicData }: { clinicData: Clinic[] }) {
             <span>{clinic.patients} active</span>
             <span>{clinic.stock}% Stocked</span>
             <StatusPill value={clinic.status} />
-            <span className="table-actions">Edit &nbsp; Configure</span>
+            <span className="table-actions"><button onClick={() => edit(clinic)}>Edit</button> <button onClick={() => onDeleteClinic(clinic.name)}>Delete</button></span>
           </div>
         ))}
       </div>
@@ -2637,13 +2572,49 @@ function AdminStaff({
   pendingStaff,
   onApprove,
   onReject,
+  onCreateStaff,
+  onUpdateStaff,
+  onDeleteStaff,
 }: {
   approvedStaff: StaffRegistration[];
   pendingStaff: StaffRegistration[];
   onApprove: (id: string) => void;
   onReject: (id: string) => void;
+  onCreateStaff: (staff: StaffUpdate & { role: "staff" | "admin"; password: string }) => Promise<{ temporaryPassword?: string }>;
+  onUpdateStaff: (id: string, update: StaffUpdate) => Promise<void>;
+  onDeleteStaff: (id: string) => Promise<void>;
 }) {
   const staff = [...approvedStaff, ...pendingStaff];
+  const [showCreate, setShowCreate] = useState(false);
+  const [name, setName] = useState("");
+  const [email, setEmail] = useState("");
+  const [role, setRole] = useState<"staff" | "admin">("staff");
+  const [password, setPassword] = useState("");
+  const [clinic, setClinic] = useState(clinics[0].name);
+  const [message, setMessage] = useState("");
+  const [creating, setCreating] = useState(false);
+  const createStaff = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setCreating(true);
+    setMessage("");
+    try {
+      const result = await onCreateStaff({ name: name.trim(), email: email.trim().toLowerCase(), clinic, role, password });
+      setMessage(result.temporaryPassword ? `Created. Temporary password: ${result.temporaryPassword}` : "Created and invitation email sent.");
+      setName("");
+      setEmail("");
+      setPassword("");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Staff account could not be created.");
+    } finally {
+      setCreating(false);
+    }
+  };
+  const editStaff = async (member: StaffRegistration) => {
+    const name = window.prompt("Staff name", member.name)?.trim();
+    const email = window.prompt("Staff email", member.email)?.trim().toLowerCase();
+    const clinic = window.prompt("Assigned clinic", member.clinic)?.trim();
+    if (name && email && clinic) await onUpdateStaff(member.id, { name, email, clinic });
+  };
   return (
     <main className="admin-page">
       <div className="admin-page-title">
@@ -2654,8 +2625,26 @@ function AdminStaff({
             activation states.
           </p>
         </div>
-        <button className="primary-button">+ Register New Personnel</button>
+        <button className="primary-button" onClick={() => setShowCreate((value) => !value)}>
+          {showCreate ? "Close" : "+ Register New Personnel"}
+        </button>
       </div>
+      {showCreate && (
+        <form className="admin-filters" onSubmit={createStaff}>
+          <input value={name} onChange={(event) => setName(event.target.value)} placeholder="Full name" required />
+          <input value={email} onChange={(event) => setEmail(event.target.value)} type="email" placeholder="Email address" required />
+          <select value={clinic} onChange={(event) => setClinic(event.target.value)}>
+            {clinics.map((item) => <option key={item.name}>{item.name}</option>)}
+          </select>
+          <select value={role} onChange={(event) => setRole(event.target.value as "staff" | "admin")}>
+            <option value="staff">Staff</option>
+            <option value="admin">Administrator</option>
+          </select>
+          <input value={password} onChange={(event) => setPassword(event.target.value)} type="password" minLength={6} placeholder="Temporary password" required />
+          <button className="primary-button" type="submit" disabled={creating}>{creating ? "Creating..." : "Create and email invite"}</button>
+          {message && <span className="queue-message">{message}</span>}
+        </form>
+      )}
       <div className="admin-filters">
         <input placeholder="Search staff by name, email, or ID..." />
         <select>
@@ -2695,7 +2684,10 @@ function AdminStaff({
             ) : (
               <>
                 <StatusPill value="Active" />
-                <span className="table-actions">Edit &nbsp; Suspend</span>
+                <span className="table-actions">
+                  <button onClick={() => editStaff(member)}>Edit</button>{" "}
+                  <button onClick={() => window.confirm(`Delete ${member.name}?`) && onDeleteStaff(member.id)}>Delete</button>
+                </span>
               </>
             )}
           </div>
@@ -3249,7 +3241,7 @@ function Portal({
   clinicData: Clinic[];
   medicationData: Medication[];
   enrolledClinic: string;
-  onCreateStaff: (staff: StaffUpdate) => void;
+  onCreateStaff: (staff: StaffUpdate & { role: "staff" | "admin"; password: string }) => Promise<{ temporaryPassword?: string }>;
   onUpdateStaff: (id: string, update: StaffUpdate) => void;
   onDeleteStaff: (id: string) => void;
   onUpdateClinic: (name: string, update: ClinicControlUpdate) => void;
@@ -3263,6 +3255,7 @@ function Portal({
     <>
       <StaffCrudPanel
         approvedStaff={props.approvedStaff}
+        onCreateStaff={props.onCreateStaff}
         onUpdateStaff={props.onUpdateStaff}
         onDeleteStaff={props.onDeleteStaff}
       />
@@ -3401,41 +3394,21 @@ export default function Home() {
     window.addEventListener("keydown", handleKeyboardBack);
     return () => window.removeEventListener("keydown", handleKeyboardBack);
   }, [previousView, view]);
-  const registerStaff = async (
-    registration: Omit<StaffRegistration, "id">,
-    password: string,
-  ) => {
-    const response = await fetch(`${apiUrl}/api/staff`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ...registration, password }),
-    });
-    const result = (await response.json().catch(() => ({}))) as {
-      error?: string;
-    } & ApiStaff;
-    if (!response.ok) throw new Error(result.error || "Registration failed.");
-    const saved = toStaffRegistration(result);
-    setPendingStaff((current) => [...current, saved]);
-    setSystemSummary((current) => ({
-      ...current,
-      pendingApprovals: current.pendingApprovals + 1,
-    }));
-    setAuthMessage(
-      "Registration submitted. An administrator must approve your account before you can sign in.",
-    );
-  };
-  const createStaff = async (staff: StaffUpdate) => {
+  const createStaff = async (staff: StaffUpdate & { role: "staff" | "admin"; password: string }) => {
     const response = await fetch(`${apiUrl}/api/staff`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ ...staff, status: "approved" }),
     });
-    const saved = toStaffRegistration((await response.json()) as ApiStaff);
+    const result = (await response.json().catch(() => ({}))) as ApiStaff & { temporaryPassword?: string; error?: string };
+    if (!response.ok) throw new Error(result.error || "Staff account could not be created.");
+    const saved = toStaffRegistration(result);
     setApprovedStaff((current) => [...current, saved]);
     setSystemSummary((current) => ({
       ...current,
       totalStaff: current.totalStaff + 1,
     }));
+    return { temporaryPassword: result.temporaryPassword };
   };
   const updateStaff = async (id: string, update: StaffUpdate) => {
     await fetch(`${apiUrl}/api/staff/${id}`, {
@@ -3477,6 +3450,29 @@ export default function Home() {
         clinic.name === name ? { ...clinic, ...saved } : clinic,
       ),
     );
+  };
+  const createClinic = async (clinic: Omit<Clinic, "id" | "distance" | "wait" | "patients" | "stock" | "status" | "updatedAt">) => {
+    const response = await fetch(`${apiUrl}/api/clinics`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(clinic) });
+    const result = (await response.json().catch(() => ({}))) as Clinic & { error?: string };
+    if (!response.ok) throw new Error(result.error || "Clinic could not be created.");
+    const saved = { ...result, distance: 0 };
+    clinics = [...clinics, saved];
+    setClinicData((current) => [...current, saved]);
+  };
+  const updateClinicAdmin = async (name: string, update: ClinicAdminUpdate) => {
+    const response = await fetch(`${apiUrl}/api/clinics/${encodeURIComponent(name)}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(update) });
+    const result = (await response.json().catch(() => ({}))) as Clinic & { error?: string };
+    if (!response.ok) throw new Error(result.error || "Clinic could not be updated.");
+    const saved = { ...result, distance: clinics.find((clinic) => clinic.name === name)?.distance ?? 0 };
+    clinics = clinics.map((clinic) => clinic.name === name ? saved : clinic);
+    setClinicData((current) => current.map((clinic) => clinic.name === name ? saved : clinic));
+  };
+  const deleteClinic = async (name: string) => {
+    if (!window.confirm(`Delete ${name}?`)) return;
+    const response = await fetch(`${apiUrl}/api/clinics/${encodeURIComponent(name)}`, { method: "DELETE" });
+    if (!response.ok) throw new Error("Clinic could not be deleted.");
+    clinics = clinics.filter((clinic) => clinic.name !== name);
+    setClinicData((current) => current.filter((clinic) => clinic.name !== name));
   };
   const updateMedication = async (
     clinicName: string,
@@ -3637,13 +3633,16 @@ export default function Home() {
             systemSummary={systemSummary}
           />
         )}
-        {view === "adminClinics" && <AdminClinics clinicData={clinicData} />}
+        {view === "adminClinics" && <AdminClinics clinicData={clinicData} onCreateClinic={createClinic} onUpdateClinic={updateClinicAdmin} onDeleteClinic={deleteClinic} />}
         {view === "adminStaff" && (
           <AdminStaff
             approvedStaff={approvedStaff}
             pendingStaff={pendingStaff}
             onApprove={approveStaff}
             onReject={rejectStaff}
+            onCreateStaff={createStaff}
+            onUpdateStaff={updateStaff}
+            onDeleteStaff={deleteStaff}
           />
         )}
         {view === "adminMedications" && (
@@ -3716,7 +3715,6 @@ export default function Home() {
     return (
       <Auth
         message={authMessage}
-        onRegister={registerStaff}
         onLogin={login}
         onPublic={() => navigate("home")}
         onBack={() => navigate(previousView)}
