@@ -572,14 +572,11 @@ function PublicHome({
       <section className="hero">
         <p className="eyebrow">PUBLIC HEALTH INFORMATION NETWORK</p>
         <h1>
-          Real-time clinic queues.
-          <br />
-          <em>Better prepared visits.</em>
+          Stay Informed. Plan Ahead.
         </h1>
         <p>
-          Check current wait times, active patient counts, and essential
-          medication availability in nearby public health clinics before you
-          leave home.
+          Check clinic queues, estimated waiting times, and medication
+          availability before visiting a public health clinic.
         </p>
         <div className="search-bar">
           <label>
