@@ -1,7 +1,7 @@
 const { allocateTicket, callTicket, canServeTicket, deriveQueue, expireTickets, getQueueSlotMinutes, getQueueStatus, hasActiveQueueTicket, publicTicket } = require('./queue');
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { getAvailability, parseStockCount, calculateStockMovement, isAllowedClinicStatus } = require('./validation');
+const { getAvailability, parseStockCount, calculateStockMovement, isAllowedClinicStatus, isClinicOpenNow } = require('./validation');
 const { hashPassword, verifyPassword, isValidPassword } = require('./password');
 const { defaultMedications, createClinicInventory, setClinicMedicationStock } = require('./medication-catalog');
 
@@ -52,6 +52,16 @@ test('dispensing subtracts and restocking adds positive whole quantities', () =>
 test('allowed queue statuses are enforced', () => {
   assert.equal(isAllowedClinicStatus('Open - Busy'), true);
   assert.equal(isAllowedClinicStatus('Unknown'), false);
+});
+
+test('clinic status is closed outside configured operating hours', () => {
+  const weekdayBeforeOpening = new Date('2026-10-07T07:59:00.000Z');
+  const openingTime = new Date('2026-10-07T08:00:00.000Z');
+  const closingTime = new Date('2026-10-07T17:00:00.000Z');
+  assert.equal(isClinicOpenNow('08:00 - 17:00', weekdayBeforeOpening, 'UTC'), false);
+  assert.equal(isClinicOpenNow('08:00 - 17:00', openingTime, 'UTC'), true);
+  assert.equal(isClinicOpenNow('08:00 - 17:00', closingTime, 'UTC'), false);
+  assert.equal(isClinicOpenNow('Mon - Fri: 08:00 - 17:00', new Date('2026-10-10T10:00:00.000Z'), 'UTC'), false);
 });
 
 test('queue numbers and waits are isolated by clinic', () => {

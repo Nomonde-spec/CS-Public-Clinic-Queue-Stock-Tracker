@@ -1,7 +1,7 @@
 const { allocateTicket, callTicket, canServeTicket, deriveQueue, expireTickets, hasActiveQueueTicket, publicTicket, queueDate } = require("./queue");
 const http = require("node:http");
 const { Pool } = require("pg");
-const { getAvailability, parseStockCount, calculateStockMovement, isAllowedClinicStatus } = require("./validation");
+const { getAvailability, parseStockCount, calculateStockMovement, isAllowedClinicStatus, isClinicOpenNow } = require("./validation");
 const { hashPassword, verifyPassword, createResetToken, hashResetToken, isValidPassword } = require("./password");
 const { defaultMedications, createClinicInventory, setClinicMedicationStock } = require("./medication-catalog");
 const { getPasswordResetEmailConfig, sendPasswordResetEmail } = require("./password-reset-email");
@@ -25,6 +25,7 @@ const allowedOrigins = (process.env.CLIENT_ORIGINS || process.env.CLIENT_ORIGIN 
 	.map((origin) => origin.trim())
 	.filter(Boolean);
 const isValidEmail = (email) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+const effectiveClinicStatus = (clinic, status = clinic.status, now = new Date()) => !isClinicOpenNow(clinic.hours, now) ? "Closed" : status;
 
 function createMemoryDb() {
 	const clinics = defaultClinics.map((clinic) => ({ ...clinic }));
@@ -175,9 +176,9 @@ function createMemoryDb() {
 				const clinic = clinics.find((item) => item.name === args[0]);
 				return { rows: clinic ? [{ id: clinic.id }] : [] };
 			}
-			if (text.startsWith("SELECT id, name, status FROM clinics WHERE name = $1")) {
+			if (text.startsWith("SELECT id, name, status, hours FROM clinics WHERE name = $1")) {
 				const clinic = clinics.find((item) => item.name === args[0]);
-				return { rows: clinic ? [{ id: clinic.id, name: clinic.name, status: clinic.status }] : [] };
+				return { rows: clinic ? [{ id: clinic.id, name: clinic.name, status: clinic.status, hours: clinic.hours }] : [] };
 			}
 			if (text.startsWith("INSERT INTO medications")) {
 				const [name, category, availability, clinicsValue, stockCount] = args;
@@ -330,34 +331,37 @@ async function getQueueTickets(clinicId, clinicName, date = queueDate(), clinicS
 }
 
 async function getClinicQueue(clinicName) {
-	const clinicResult = await pool.query("SELECT id, name, status FROM clinics WHERE name = $1", [clinicName]);
+	const clinicResult = await pool.query("SELECT id, name, status, hours FROM clinics WHERE name = $1", [clinicName]);
 	if (!clinicResult.rows[0]) return null;
 	await expireQueueTickets(clinicName);
-const tickets = await getQueueTickets(clinicResult.rows[0].id, clinicName, queueDate(), clinicResult.rows[0].status);
-	return { clinic: clinicResult.rows[0], tickets, summary: deriveQueue(tickets, new Date(), clinicResult.rows[0].status) };
+	const clinicStatus = effectiveClinicStatus(clinicResult.rows[0]);
+	const tickets = await getQueueTickets(clinicResult.rows[0].id, clinicName, queueDate(), clinicStatus);
+	return { clinic: clinicResult.rows[0], tickets, summary: deriveQueue(tickets, new Date(), clinicStatus) };
 }
 
 async function createQueueTicket(clinicName) {
-	const clinic = (await pool.query("SELECT id, name, status FROM clinics WHERE name = $1", [clinicName])).rows[0];
+	const clinic = (await pool.query("SELECT id, name, status, hours FROM clinics WHERE name = $1", [clinicName])).rows[0];
 	if (!clinic) return { error: "Clinic not found.", status: 404 };
-	if (clinic.status === "Closed") return { error: "This clinic is currently closed.", status: 409 };
+	const clinicStatus = effectiveClinicStatus(clinic);
+	if (clinicStatus === "Closed") return { error: "This clinic is currently closed.", status: 409 };
 	if (!process.env.DATABASE_URL) {
 		expireTickets(memoryQueueTickets);
-		const ticket = allocateTicket(memoryQueueTickets, clinicName, new Date(), clinic.status);
+		const ticket = allocateTicket(memoryQueueTickets, clinicName, new Date(), clinicStatus);
 		memoryQueueTickets.push(ticket);
-		return { ticket: publicTicket(ticket, memoryQueueTickets, new Date(), clinic.status), capability: ticket.raw };
+		return { ticket: publicTicket(ticket, memoryQueueTickets, new Date(), clinicStatus), capability: ticket.raw };
 	}
 
 	const client = await pool.connect();
 	try {
 		await client.query("BEGIN");
-		const clinicResult = await client.query("SELECT id, name, status FROM clinics WHERE name = $1 FOR UPDATE", [clinicName]);
+		const clinicResult = await client.query("SELECT id, name, status, hours FROM clinics WHERE name = $1 FOR UPDATE", [clinicName]);
 		const lockedClinic = clinicResult.rows[0];
 		if (!lockedClinic) {
 			await client.query("ROLLBACK");
 			return { error: "Clinic not found.", status: 404 };
 		}
-		if (lockedClinic.status === "Closed") {
+		const lockedClinicStatus = effectiveClinicStatus(lockedClinic);
+		if (lockedClinicStatus === "Closed") {
 			await client.query("ROLLBACK");
 			return { error: "This clinic is currently closed.", status: 409 };
 		}
@@ -368,14 +372,14 @@ async function createQueueTicket(clinicName) {
 			[lockedClinic.id],
 		);
 		const existing = result.rows.map((row) => ticketFromRow(row, clinicName));
-		const ticket = allocateTicket(existing, clinicName, new Date(), lockedClinic.status);
+		const ticket = allocateTicket(existing, clinicName, new Date(), lockedClinicStatus);
 		await client.query(
 			`INSERT INTO queue_tickets (id, clinic_id, queue_date, queue_number, issued_queue_number, status, scheduled_at, capability_hash, created_at)
 			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
 			[ticket.id, lockedClinic.id, ticket.queueDate, ticket.queueNumber, ticket.issuedQueueNumber, ticket.status, ticket.scheduledAt, ticket.capabilityHash, ticket.createdAt],
 		);
 		await client.query("COMMIT");
-		return { ticket: publicTicket(ticket, [...existing, ticket], new Date(), lockedClinic.status), capability: ticket.raw };
+		return { ticket: publicTicket(ticket, [...existing, ticket], new Date(), lockedClinicStatus), capability: ticket.raw };
 	} catch (error) {
 		await client.query("ROLLBACK");
 		throw error;
@@ -401,7 +405,7 @@ async function findTicket(ticketId, capability) {
 	return { ticket, tickets: await getQueueTickets(null, ticket.clinicName, ticket.queueDate) };
 }
 
-async function settleDatabaseTicket(ticketId, capability, staffClinicName = null) {
+async function settleDatabaseTicket(ticketId, capability, staffClinicName = null, medications = []) {
 	const client = await pool.connect();
 	try {
 		await client.query("BEGIN");
@@ -427,6 +431,28 @@ async function settleDatabaseTicket(ticketId, capability, staffClinicName = null
 		if (!dueResult.rows[0]) {
 			await client.query("ROLLBACK");
 			return { error: "This ticket is not ready for service yet.", status: 409 };
+		}
+		for (const medication of medications) {
+			const current = (await client.query(
+				`SELECT c.id AS "clinicId", m.id AS "medicationId", m.name, m.category, cm.stock_count AS "stockCount"
+				 FROM clinic_medications cm JOIN clinics c ON c.id = cm.clinic_id JOIN medications m ON m.id = cm.medication_id
+				 WHERE c.name = $1 AND m.name = $2 FOR UPDATE`,
+				[row.clinic_name, medication.name],
+			)).rows[0];
+			if (!current) {
+				await client.query("ROLLBACK");
+				return { error: `Medication not found: ${medication.name}.`, status: 404 };
+			}
+			const movement = calculateStockMovement(Number(current.stockCount), medication.quantity, "dispense");
+			if (!movement.ok) {
+				await client.query("ROLLBACK");
+				return { error: `${current.name}: ${movement.error}`, status: movement.status };
+			}
+			await client.query(
+				`UPDATE clinic_medications SET stock_count = $1, availability = $2, updated_at = NOW()
+				 WHERE clinic_id = $3 AND medication_id = $4`,
+				[movement.stockCount, movement.availability, current.clinicId, current.medicationId],
+			);
 		}
 		const servedResult = await client.query(
 			`UPDATE queue_tickets
@@ -787,7 +813,8 @@ async function handleRequest(request, response) {
 			]);
 			const clinicsWithQueue = await Promise.all(clinicResult.rows.map(async (clinic) => {
 				const queue = await getClinicQueue(clinic.name);
-				return { ...clinic, status: queue?.summary.status ?? "Open - Low Wait", patients: queue?.summary.patients ?? 0, wait: queue?.summary.wait ?? 0, nextQueueNumber: queue?.summary.nextQueueNumber ?? 1, queueUpdatedAt: queue?.summary.updatedAt ?? new Date().toISOString() };
+				const status = effectiveClinicStatus(clinic, queue?.summary.status ?? clinic.status);
+				return { ...clinic, status, patients: queue?.summary.patients ?? 0, wait: queue?.summary.wait ?? 0, nextQueueNumber: queue?.summary.nextQueueNumber ?? 1, queueUpdatedAt: queue?.summary.updatedAt ?? new Date().toISOString() };
 			}));
 			return send(response, 200, { clinics: clinicsWithQueue, medications: medicationResult.rows });
 		}
@@ -795,10 +822,11 @@ async function handleRequest(request, response) {
 		const queueCreateMatch = request.url.match(/^\/api\/clinics\/([^/]+)\/queue-tickets$/);
 		if (queueCreateMatch && request.method === "GET") {
 			const clinicName = decodeURIComponent(queueCreateMatch[1]);
-			const clinicResult = await pool.query("SELECT id, name, status FROM clinics WHERE name = $1", [clinicName]);
+			const clinicResult = await pool.query("SELECT id, name, status, hours FROM clinics WHERE name = $1", [clinicName]);
 			if (!clinicResult.rows[0]) return send(response, 404, { error: "Clinic not found." });
-			const tickets = await getQueueTickets(clinicResult.rows[0].id, clinicName, queueDate(), clinicResult.rows[0].status);
-			return send(response, 200, { clinicName, tickets: tickets.map((ticket) => publicTicket(ticket, tickets, new Date(), clinicResult.rows[0].status)) });
+			const clinicStatus = effectiveClinicStatus(clinicResult.rows[0]);
+			const tickets = await getQueueTickets(clinicResult.rows[0].id, clinicName, queueDate(), clinicStatus);
+			return send(response, 200, { clinicName, tickets: tickets.map((ticket) => publicTicket(ticket, tickets, new Date(), clinicStatus)) });
 		}
 		if (queueCreateMatch && request.method === "POST") {
 			await readBody(request);
@@ -818,7 +846,12 @@ async function handleRequest(request, response) {
 			const ticketId = staffTicketActionMatch[2];
 			const action = staffTicketActionMatch[3];
 			if (action === "serve" && process.env.DATABASE_URL) {
-				const settlement = await settleDatabaseTicket(ticketId, null, clinicName);
+				const body = await readBody(request);
+				const medications = Array.isArray(body.medications) ? body.medications.map((item) => ({ name: String(item?.name || "").trim(), quantity: Number(item?.quantity) })).filter((item) => item.name) : [];
+				if (medications.some((item) => !Number.isInteger(item.quantity) || item.quantity <= 0) || new Set(medications.map((item) => item.name)).size !== medications.length) {
+					return send(response, 400, { error: "Each selected medication needs a unique positive whole quantity." });
+				}
+				const settlement = await settleDatabaseTicket(ticketId, null, clinicName, medications);
 				if (!settlement.ticket) return send(response, settlement.status, { error: settlement.error });
 				const refreshedTickets = await getQueueTickets(null, clinicName, settlement.ticket.queueDate);
 				return send(response, 200, publicTicket(settlement.ticket, refreshedTickets));
@@ -838,6 +871,13 @@ async function handleRequest(request, response) {
 				if (!callTicket(ticket)) return send(response, 409, { error: "Only waiting tickets can be approved." });
 			} else if (action === "serve") {
 				if (!canServeTicket(ticket)) return send(response, 409, { error: "This ticket is not ready for service yet." });
+				const body = await readBody(request);
+				const medications = Array.isArray(body.medications) ? body.medications.map((item) => ({ name: String(item?.name || "").trim(), quantity: Number(item?.quantity) })).filter((item) => item.name) : [];
+				for (const medication of medications) {
+					if (!Number.isInteger(medication.quantity) || medication.quantity <= 0) return send(response, 400, { error: "Each selected medication needs a positive whole quantity." });
+					const result = await changeClinicMedicationStock(clinicName, medication.name, medication.quantity, "dispense");
+					if (result.error) return send(response, result.status, { error: result.error });
+				}
 				ticket.status = "served";
 				ticket.servedAt = new Date().toISOString();
 			} else {

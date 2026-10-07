@@ -1,4 +1,3 @@
-token:123123
 # CareQueue Public Clinic Queue and Stock Tracker
 
 CareQueue lets public users check clinic queues and medication availability, request an anonymous queue ticket, and select multiple medications for one visit. Approved clinic staff manage ticket approval, service, and stock updates.
