@@ -3,22 +3,43 @@ const assert = require("node:assert/strict");
 const { buildPasswordResetUrl, getPasswordResetEmailConfig, sendPasswordResetEmail, sendStaffInvitationEmail } = require("./password-reset-email");
 
 const emailEnv = {
-	RESEND_API_KEY: "re_test_api_key",
-	EMAIL_FROM: "CareQueue <no-reply@example.test>",
+	SMTP_HOST: "smtp.example.test",
+	SMTP_PORT: "587",
+	SMTP_SECURE: "false",
+	SMTP_USER: "user@example.test",
+	SMTP_PASSWORD: "test-password",
+	SMTP_FROM: "CareQueue <no-reply@example.test>",
 	PUBLIC_APP_URL: "https://carequeue.example.test",
 };
 
-test("Resend config requires an API key, sender, and public app URL", () => {
+test("SMTP config validates sender, host, credentials, and TLS mode", () => {
 	assert.equal(getPasswordResetEmailConfig({}), null);
-	assert.equal(getPasswordResetEmailConfig({ ...emailEnv, RESEND_API_KEY: " " }), null);
-	assert.equal(getPasswordResetEmailConfig({ ...emailEnv, EMAIL_FROM: " " }), null);
+	assert.equal(getPasswordResetEmailConfig({ ...emailEnv, SMTP_HOST: " " }), null);
+	assert.equal(getPasswordResetEmailConfig({ ...emailEnv, SMTP_FROM: " " }), null);
 	assert.equal(getPasswordResetEmailConfig({ ...emailEnv, PUBLIC_APP_URL: "not-a-url" }), null);
+	assert.equal(getPasswordResetEmailConfig({ ...emailEnv, SMTP_USER: "" }), null);
+	assert.equal(getPasswordResetEmailConfig({ ...emailEnv, SMTP_SECURE: "true" }), null);
+	assert.equal(getPasswordResetEmailConfig({ ...emailEnv, SMTP_PORT: "465", SMTP_SECURE: "false" }), null);
 	assert.deepEqual(getPasswordResetEmailConfig(emailEnv), {
-		apiKey: emailEnv.RESEND_API_KEY,
-		from: emailEnv.EMAIL_FROM,
+		from: emailEnv.SMTP_FROM,
 		publicAppUrl: emailEnv.PUBLIC_APP_URL,
+		transport: {
+			host: emailEnv.SMTP_HOST,
+			port: 587,
+			secure: false,
+			auth: { user: emailEnv.SMTP_USER, pass: emailEnv.SMTP_PASSWORD },
+		},
 	});
-	assert.equal(getPasswordResetEmailConfig({ ...emailEnv, PUBLIC_APP_URL: "", CLIENT_ORIGIN: "https://client.example.test" }).publicAppUrl, "https://client.example.test");
+	assert.equal(getPasswordResetEmailConfig({
+		...emailEnv,
+		SMTP_PORT: "465",
+		SMTP_SECURE: undefined,
+	}).transport.secure, true);
+	assert.equal(getPasswordResetEmailConfig({
+		...emailEnv,
+		PUBLIC_APP_URL: "",
+		CLIENT_ORIGIN: "https://client.example.test",
+	}).publicAppUrl, "https://client.example.test");
 });
 
 test("password reset URL keeps its token in the fragment", () => {
@@ -29,28 +50,29 @@ test("password reset URL keeps its token in the fragment", () => {
 	assert.equal(resetUrl.hash.includes("resetEmail=staff%40example.test"), true);
 });
 
-test("password reset email uses the Resend client and preserves its payload", async () => {
+test("password reset email uses the SMTP transport and preserves its payload", async () => {
 	let sentMessage;
-	let providedApiKey;
+	let transportOptions;
+	let sentResult;
 	const result = await sendPasswordResetEmail({
 		email: "staff@example.test",
 		token: "one-time-token",
 		role: "staff",
 		env: emailEnv,
-		createClient(apiKey) {
-			providedApiKey = apiKey;
-			return { emails: { async send(message) { sentMessage = message; return { data: { id: "email_123" }, error: null }; } } };
+		createTransport(options) {
+			transportOptions = options;
+			return { async sendMail(message) { sentMessage = message; return (sentResult = { messageId: "email_123" }); } };
 		},
 	});
-	assert.equal(providedApiKey, emailEnv.RESEND_API_KEY);
+	assert.deepEqual(transportOptions, getPasswordResetEmailConfig(emailEnv).transport);
 	assert.equal(sentMessage.to, "staff@example.test");
-	assert.equal(sentMessage.from, emailEnv.EMAIL_FROM);
+	assert.equal(sentMessage.from, emailEnv.SMTP_FROM);
 	assert.equal(sentMessage.subject, "Reset your CareQueue password");
 	assert.match(sentMessage.text, /resetToken=one-time-token/);
-	assert.deepEqual(result, { id: "email_123" });
+	assert.deepEqual(result, sentResult);
 });
 
-test("email delivery refuses missing Resend configuration", async () => {
+test("email delivery refuses missing SMTP configuration", async () => {
 	await assert.rejects(
 		sendPasswordResetEmail({ email: "staff@example.test", token: "token", role: "staff", env: {} }),
 		(error) => error.code === "EMAIL_NOT_CONFIGURED",
@@ -66,18 +88,18 @@ test("staff invitation email preserves its recipient, sender, and content", asyn
 		temporaryPassword: "temporary-password",
 		token: "one-time-token",
 		env: emailEnv,
-		createClient() {
-			return { emails: { async send(message) { sentMessage = message; return { data: { id: "email_456" }, error: null }; } } };
+		createTransport() {
+			return { async sendMail(message) { sentMessage = message; return { messageId: "email_456" }; } };
 		},
 	});
 	assert.equal(sentMessage.to, "new.staff@example.test");
-	assert.equal(sentMessage.from, emailEnv.EMAIL_FROM);
+	assert.equal(sentMessage.from, emailEnv.SMTP_FROM);
 	assert.equal(sentMessage.subject, "Your CareQueue staff account");
 	assert.match(sentMessage.text, /Temporary password: temporary-password/);
 	assert.match(sentMessage.text, /resetToken=one-time-token/);
 });
 
-test("provider rejections expose safe status details without provider messages", async () => {
+test("SMTP authentication failures retain safe diagnostics", async () => {
 	await assert.rejects(
 		sendStaffInvitationEmail({
 			email: "new.staff@example.test",
@@ -86,23 +108,23 @@ test("provider rejections expose safe status details without provider messages",
 			temporaryPassword: "temporary-password",
 			token: "one-time-token",
 			env: emailEnv,
-			createClient() {
-				return { emails: { async send() { return { data: null, error: { name: "validation_error", message: "private provider detail", statusCode: 422 } }; } } };
+			createTransport() {
+				return { async sendMail() { throw Object.assign(new Error("private SMTP detail"), { code: "EAUTH", responseCode: 535 }); } };
 			},
 		}),
-		(error) => error.code === "validation_error" && error.responseCode === 422 && !error.message.includes("private provider detail"),
+		(error) => error.code === "EAUTH" && error.responseCode === 535 && !error.message.includes("private SMTP detail"),
 	);
 });
 
-test("network errors retain a safe diagnostic code", async () => {
+test("SMTP network errors retain a safe diagnostic code", async () => {
 	await assert.rejects(
 		sendPasswordResetEmail({
 			email: "staff@example.test",
 			token: "one-time-token",
 			role: "staff",
 			env: emailEnv,
-			createClient() {
-				return { emails: { async send() { throw Object.assign(new Error("private network detail"), { code: "ETIMEDOUT" }); } } };
+			createTransport() {
+				return { async sendMail() { throw Object.assign(new Error("private network detail"), { code: "ETIMEDOUT" }); } };
 			},
 		}),
 		(error) => error.code === "ETIMEDOUT" && !error.message.includes("private network detail"),
