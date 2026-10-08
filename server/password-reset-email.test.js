@@ -108,3 +108,20 @@ test("network errors retain a safe diagnostic code", async () => {
 		(error) => error.code === "ETIMEDOUT" && !error.message.includes("private network detail"),
 	);
 });
+
+test("staff invitation email still sends a setup link when no temporary password is available", async () => {
+	let sentMessage;
+	await sendStaffInvitationEmail({
+		email: "approved.staff@example.test",
+		name: "Approved Staff",
+		clinic: "Metro Family Care Centre",
+		token: "approved-token",
+		env: emailEnv,
+		createClient() {
+			return { emails: { async send(message) { sentMessage = message; return { data: { id: "email_789" }, error: null }; } } };
+		},
+	});
+	assert.equal(sentMessage.to, "approved.staff@example.test");
+	assert.match(sentMessage.text, /Use the secure setup link below/);
+	assert.match(sentMessage.text, /resetToken=approved-token/);
+});

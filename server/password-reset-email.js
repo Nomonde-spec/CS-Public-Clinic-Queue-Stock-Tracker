@@ -70,10 +70,13 @@ async function sendStaffInvitationEmail({ email, name, clinic, role = "staff", t
 	const config = getPasswordResetEmailConfig(env);
 	if (!config) throw createDeliveryError("Resend email delivery is not configured.", "EMAIL_NOT_CONFIGURED");
 	const resetUrl = buildPasswordResetUrl(config.publicAppUrl, email, token, role);
+	const passwordBlock = temporaryPassword
+		? `\n\nTemporary password: ${temporaryPassword}\n\n`
+		: "\n\nUse the secure setup link below to complete your password.\n\n";
 	return sendEmail({
 		to: email,
 		subject: "Your CareQueue staff account",
-		text: `Hello ${name},\n\nAn administrator created your CareQueue ${role} account for ${clinic}.\n\nTemporary password: ${temporaryPassword}\n\nOpen this one-time link within 30 minutes to create your permanent password:\n\n${resetUrl}\n\nIf you did not expect this account, contact your clinic administrator.`,
+		text: `Hello ${name},\n\nAn administrator created your CareQueue ${role} account for ${clinic}.${passwordBlock}Open this one-time link within 30 minutes to create your permanent password:\n\n${resetUrl}\n\nIf you did not expect this account, contact your clinic administrator.`,
 		env,
 		createClient,
 	});
