@@ -1,16 +1,7 @@
 ﻿"use client";
 
-<<<<<<< HEAD
-<<<<<<< HEAD
-import { FormEvent, useEffect, useState } from "react";
-import { dedupeStaffList } from "../lib/staff";
-=======
-import { FormEvent, useCallback, useEffect, useState } from "react";
->>>>>>> a75f016abb8869163b3093629107b8ee8851d5b5
-=======
 import { FormEvent, useCallback, useEffect, useState } from "react";
 import { dedupeStaffList } from "../lib/staff";
->>>>>>> e47ae0791c5edd71934830d9a7e2389f8f35375d
 
 type View =
   | "home"
