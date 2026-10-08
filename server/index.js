@@ -5,6 +5,7 @@ const { getAvailability, parseStockCount, calculateStockMovement, isAllowedClini
 const { hashPassword, verifyPassword, createResetToken, hashResetToken, isValidPassword } = require("./password");
 const { defaultMedications, createClinicInventory, setClinicMedicationStock } = require("./medication-catalog");
 const { getPasswordResetEmailConfig, sendPasswordResetEmail, sendStaffInvitationEmail } = require("./password-reset-email");
+const { getAllowedOrigins, validateProductionConfig } = require("./runtime-config");
 
 const port = Number(process.env.PORT) || 3000;
 const defaultClinics = [
@@ -20,10 +21,7 @@ const defaultClinics = [
 ];
 const memoryQueueTickets = [];
 
-const allowedOrigins = (process.env.CLIENT_ORIGINS || process.env.CLIENT_ORIGIN || "http://localhost:3000")
-	.split(",")
-	.map((origin) => origin.trim())
-	.filter(Boolean);
+const allowedOrigins = getAllowedOrigins();
 const isValidEmail = (email) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
 const effectiveClinicStatus = (clinic, status = clinic.status, now = new Date()) => !isClinicOpenNow(clinic.hours, now) ? "Closed" : status;
 
@@ -284,7 +282,9 @@ async function initializePool() {
 		await dbPool.query("SELECT 1");
 		pool = dbPool;
 	} catch (error) {
-		console.warn("Database unavailable; using in-memory fallback mode.", error.message);
+		await dbPool.end().catch(() => {});
+		if (process.env.NODE_ENV === "production") throw new Error("PostgreSQL is unavailable in production.");
+		console.warn("Database unavailable; using in-memory fallback mode.");
 		delete process.env.DATABASE_URL;
 		pool = createMemoryDb();
 	}
@@ -535,14 +535,17 @@ async function changeClinicMedicationStock(clinicName, medicationName, quantity,
 }
 
 const send = (response, status, body) => {
-	response.writeHead(status, {
-		"Access-Control-Allow-Origin": response.req.headers.origin && allowedOrigins.includes(response.req.headers.origin)
-			? response.req.headers.origin
-			: allowedOrigins[0],
+	const requestOrigin = response.req.headers.origin;
+	const headers = {
 		"Access-Control-Allow-Headers": "Content-Type",
 		"Access-Control-Allow-Methods": "GET,POST,PATCH,DELETE,OPTIONS",
 		"Content-Type": "application/json",
-	});
+		"Vary": "Origin",
+	};
+	if (!requestOrigin || allowedOrigins.includes(requestOrigin)) {
+		headers["Access-Control-Allow-Origin"] = requestOrigin || allowedOrigins[0];
+	}
+	response.writeHead(status, headers);
 	response.end(JSON.stringify(body));
 };
 
@@ -560,6 +563,7 @@ const staffQuery = `
 `;
 
 async function ensureDatabase() {
+	validateProductionConfig();
 	await initializePool();
 	if (!process.env.DATABASE_URL) return;
 	await pool.query(`CREATE EXTENSION IF NOT EXISTS pgcrypto`);
@@ -1198,7 +1202,8 @@ ensureDatabase()
 		console.log("Frontend: http://localhost:3000");
 		console.log(`API: http://localhost:${port}`);
 	}))
-	.catch((error) => {
-		console.error("Unable to connect to the database:", error.message);
+	.catch(async (error) => {
+		console.error("Unable to initialize production services:", error.message);
+		if (typeof pool.end === "function") await pool.end().catch(() => {});
 		process.exitCode = 1;
 	});
