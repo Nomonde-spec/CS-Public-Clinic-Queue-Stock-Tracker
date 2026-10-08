@@ -13,6 +13,11 @@
   "type": "commonjs",
   "dependencies": {
     "nodemailer": "^10.0.16",
+<<<<<<< HEAD
     "pg": "^8.23.0"
+=======
+    "pg": "^8.23.0",
+    "resend": "^6.0.0"
+>>>>>>> e47ae0791c5edd71934830d9a7e2389f8f35375d
   }
 }
