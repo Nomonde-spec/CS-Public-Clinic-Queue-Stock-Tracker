@@ -1252,7 +1252,7 @@ function Auth({
   onBack: () => void;
   message: string;
 }) {
-  const [role] = useState<Role>(() => {
+  const [role, setRole] = useState<"staff" | "admin">(() => {
     if (typeof window === "undefined") return "staff";
     const resetParams = new URLSearchParams(window.location.hash.slice(1));
     const email = resetParams.get("resetEmail");
@@ -1541,6 +1541,17 @@ function Auth({
         {mode === "signin" && (
           <>
             <label>
+              Sign in as
+              <select
+                name="role"
+                value={role}
+                onChange={(event) => setRole(event.target.value as "staff" | "admin")}
+              >
+                <option value="staff">Staff</option>
+                <option value="admin">Administrator</option>
+              </select>
+            </label>
+            <label>
               Email
               <input
                 name="email"
@@ -1573,13 +1584,20 @@ function Auth({
                 </button>
               </div>
             </label>
-            <label>
-              Admin security token (admins only)
-              <input
-                name="token"
-                placeholder="6-digit verification code"
-              />
-            </label>
+            {role === "admin" && (
+              <label>
+                Admin security token
+                <input
+                  name="token"
+                  required
+                  inputMode="numeric"
+                  pattern="[0-9]{6}"
+                  maxLength={6}
+                  autoComplete="one-time-code"
+                  placeholder="6-digit verification code"
+                />
+              </label>
+            )}
             <div className="auth-links">
               <button
                 type="button"
