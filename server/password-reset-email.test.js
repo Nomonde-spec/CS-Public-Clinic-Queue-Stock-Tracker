@@ -99,7 +99,6 @@ test("staff invitation email preserves its recipient, sender, and content", asyn
 	assert.match(sentMessage.text, /resetToken=one-time-token/);
 });
 
-<<<<<<< HEAD
 test("SMTP authentication failures retain safe diagnostics", async () => {
 	await assert.rejects(
 		sendStaffInvitationEmail({
@@ -130,7 +129,8 @@ test("SMTP network errors retain a safe diagnostic code", async () => {
 		}),
 		(error) => error.code === "ETIMEDOUT" && !error.message.includes("private network detail"),
 	);
-=======
+});
+
 test("staff invitation email still sends a setup link when no temporary password is available", async () => {
 	let sentMessage;
 	await sendStaffInvitationEmail({
@@ -138,13 +138,12 @@ test("staff invitation email still sends a setup link when no temporary password
 		name: "Approved Staff",
 		clinic: "Metro Family Care Centre",
 		token: "approved-token",
-		env: smtpEnv,
+		env: emailEnv,
 		createTransport() {
-			return { async sendMail(message) { sentMessage = message; } };
+			return { async sendMail(message) { sentMessage = message; return { messageId: "email_789" }; } };
 		},
 	});
 	assert.equal(sentMessage.to, "approved.staff@example.test");
 	assert.match(sentMessage.text, /Use the secure setup link below/);
 	assert.match(sentMessage.text, /resetToken=approved-token/);
->>>>>>> a75f016abb8869163b3093629107b8ee8851d5b5
 });
