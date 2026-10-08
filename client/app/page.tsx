@@ -1241,7 +1241,7 @@ function Auth({
     email: string,
     password: string,
     token: string,
-  ) => Promise<void>;
+  ) => Promise<"admin-token-required" | void>;
   onRegister: (details: {
     name: string;
     email: string;
@@ -1260,6 +1260,7 @@ function Auth({
     if (!email || !token) return "staff";
     return resetParams.get("resetRole") === "admin" ? "admin" : "staff";
   });
+  const [adminTokenRequired, setAdminTokenRequired] = useState(false);
   const [mode, setMode] = useState<"signin" | "register" | "forgot" | "reset">(() => {
     if (typeof window === "undefined") return "signin";
     const resetParams = new URLSearchParams(window.location.hash.slice(1));
@@ -1342,10 +1343,15 @@ function Auth({
         setMode("signin");
         setRecoveryMessage(result.message || "Password reset successfully. You can now sign in.");
       } else {
-        if (role === "admin" && !/^\d{6}$/.test(token)) {
+        if (adminTokenRequired && !/^\d{6}$/.test(token)) {
           throw new Error("Enter the 6-digit administrator security token.");
         }
-        await onLogin(role, submittedEmail, password, token);
+        const loginResult = await onLogin(role, submittedEmail, password, token);
+        if (loginResult === "admin-token-required") {
+          setRole("admin");
+          setAdminTokenRequired(true);
+          setRecoveryMessage("Enter the administrator security token to continue.");
+        }
       }
     } catch (error) {
       setRecoveryMessage(
@@ -1541,24 +1547,17 @@ function Auth({
         {mode === "signin" && (
           <>
             <label>
-              Sign in as
-              <select
-                name="role"
-                value={role}
-                onChange={(event) => setRole(event.target.value as "staff" | "admin")}
-              >
-                <option value="staff">Staff</option>
-                <option value="admin">Administrator</option>
-              </select>
-            </label>
-            <label>
               Email
               <input
                 name="email"
                 type="email"
                 required
                 value={email}
-                onChange={(event) => setEmail(event.target.value)}
+                onChange={(event) => {
+                  setEmail(event.target.value);
+                  setAdminTokenRequired(false);
+                  setRole("staff");
+                }}
                 autoComplete="email"
                 placeholder={role === "admin" ? "e.g. sys.admin@carequeue.gov" : "s.jenkins@metrocare.gov"}
               />
@@ -1584,7 +1583,7 @@ function Auth({
                 </button>
               </div>
             </label>
-            {role === "admin" && (
+            {adminTokenRequired && (
               <label>
                 Admin security token
                 <input
@@ -3708,13 +3707,20 @@ export default function Home() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ role: nextRole, email, password, token }),
       });
-      if (!response.ok) {
-        const error = (await response.json().catch(() => ({}))) as {
-          error?: string;
-        };
-        throw new Error(error.error || "Invalid credentials");
+      const result = (await response.json().catch(() => ({}))) as {
+        code?: string;
+        error?: string;
+        role?: Role;
+        name?: string;
+        clinic?: string;
+      };
+      if (response.status === 428 && result.code === "ADMIN_TOKEN_REQUIRED") {
+        return "admin-token-required";
       }
-      const result = await response.json();
+      if (!response.ok) {
+        throw new Error(result.error || "Invalid credentials");
+      }
+      if (!result.role) throw new Error("Login response did not include an account role.");
       setRole(result.role);
       if (result.name) setStaffName(result.name);
       if (result.clinic) setEnrolledClinic(result.clinic);

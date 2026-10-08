@@ -3,6 +3,7 @@ const http = require("node:http");
 const { Pool } = require("pg");
 const { getAvailability, parseStockCount, calculateStockMovement, isAllowedClinicStatus, isClinicOpenNow, normalizeStaffStatus, isApprovedStaffStatus } = require("./validation");
 const { hashPassword, verifyPassword, createResetToken, hashResetToken, isValidPassword } = require("./password");
+const { getAdminLoginStage } = require("./admin-login");
 const { defaultMedications, createClinicInventory, setClinicMedicationStock } = require("./medication-catalog");
 const { getPasswordResetEmailConfig, sendPasswordResetEmail, sendStaffInvitationEmail } = require("./password-reset-email");
 const { getAllowedOrigins, validateProductionConfig } = require("./runtime-config");
@@ -1100,13 +1101,17 @@ async function handleRequest(request, response) {
 			const isAdminLogin = body.role === "admin" || email === process.env.ADMIN_EMAIL?.trim().toLowerCase() || adminAccount.rows[0];
 			if (isAdminLogin) {
 				const admin = await pool.query("SELECT password_hash FROM staff WHERE email = $1 AND role = 'admin' AND status = 'approved'", [email]);
-				const valid = body.token === process.env.ADMIN_TOKEN
-					&& admin.rows[0] && verifyPassword(body.password, admin.rows[0].password_hash);
-				if (!valid) {
-					const staffAccount = await pool.query("SELECT 1 FROM staff WHERE email = $1 AND role = 'staff' AND status = 'approved'", [email]);
-					if (staffAccount.rows[0]) return send(response, 403, { error: "This email belongs to an approved staff account. Select Staff access to sign in." });
+				const loginStage = getAdminLoginStage({
+					passwordValid: Boolean(admin.rows[0] && verifyPassword(body.password, admin.rows[0].password_hash)),
+					token: String(body.token || "").trim(),
+					expectedToken: String(process.env.ADMIN_TOKEN || "").trim(),
+				});
+				if (loginStage === "token-required") {
+					return send(response, 428, { code: "ADMIN_TOKEN_REQUIRED", error: "Enter the administrator security token." });
 				}
-				return valid ? send(response, 200, { role: "admin", email }) : send(response, 401, { error: "Invalid administrator credentials." });
+				return loginStage === "authenticated"
+					? send(response, 200, { role: "admin", email })
+					: send(response, 401, { error: "Invalid administrator credentials." });
 			}
 			const credentials = await pool.query("SELECT password_hash FROM staff WHERE email = $1 AND role = 'staff' AND status = 'approved'", [email]);
 			const setupToken = await pool.query("SELECT 1 FROM password_reset_tokens WHERE email = $1 AND expires_at > NOW()", [email]);
