@@ -41,6 +41,15 @@ test('stock counts reject fractions and negative values', () => {
   assert.deepEqual(parseStockCount('249'), { ok: true, value: 249 });
 });
 
+test('staff status defaults to pending and only approved staff count as active', () => {
+  const { normalizeStaffStatus, isApprovedStaffStatus } = require('./validation');
+  assert.equal(normalizeStaffStatus(undefined), 'pending');
+  assert.equal(normalizeStaffStatus('approved'), 'approved');
+  assert.equal(normalizeStaffStatus('rejected'), 'rejected');
+  assert.equal(isApprovedStaffStatus('pending'), false);
+  assert.equal(isApprovedStaffStatus('approved'), true);
+});
+
 test('dispensing subtracts and restocking adds positive whole quantities', () => {
   assert.deepEqual(calculateStockMovement(20, 7, 'dispense'), { ok: true, stockCount: 13, availability: 'Low Stock' });
   assert.deepEqual(calculateStockMovement(20, 50, 'restock'), { ok: true, stockCount: 70, availability: 'Low Stock' });

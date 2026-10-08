@@ -65,3 +65,20 @@ test("staff invitation mail includes temporary credentials and setup link", asyn
 	assert.match(sentMessage.text, /Temporary password: temporary-password/);
 	assert.match(sentMessage.text, /resetToken=one-time-token/);
 });
+
+test("staff invitation email still sends a setup link when no temporary password is available", async () => {
+	let sentMessage;
+	await sendStaffInvitationEmail({
+		email: "approved.staff@example.test",
+		name: "Approved Staff",
+		clinic: "Metro Family Care Centre",
+		token: "approved-token",
+		env: smtpEnv,
+		createTransport() {
+			return { async sendMail(message) { sentMessage = message; } };
+		},
+	});
+	assert.equal(sentMessage.to, "approved.staff@example.test");
+	assert.match(sentMessage.text, /Use the secure setup link below/);
+	assert.match(sentMessage.text, /resetToken=approved-token/);
+});

@@ -32,6 +32,16 @@ function isAllowedClinicStatus(value) {
   return allowed.includes(value);
 }
 
+function normalizeStaffStatus(value) {
+  const status = String(value ?? "").trim().toLowerCase();
+  if (status === "approved" || status === "pending" || status === "rejected") return status;
+  return "pending";
+}
+
+function isApprovedStaffStatus(value) {
+  return normalizeStaffStatus(value) === "approved";
+}
+
 function parseClinicTime(value) {
   const match = String(value).trim().match(/^(\d{1,2})(?::(\d{2}))?\s*(AM|PM)?$/i);
   if (!match) return null;
@@ -76,4 +86,6 @@ module.exports = {
   parseStockCount,
   calculateStockMovement,
   isAllowedClinicStatus,
+  normalizeStaffStatus,
+  isApprovedStaffStatus,
 };

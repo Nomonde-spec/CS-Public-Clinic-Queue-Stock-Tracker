@@ -1,7 +1,7 @@
 const { allocateTicket, callTicket, canServeTicket, deriveQueue, expireTickets, hasActiveQueueTicket, publicTicket, queueDate } = require("./queue");
 const http = require("node:http");
 const { Pool } = require("pg");
-const { getAvailability, parseStockCount, calculateStockMovement, isAllowedClinicStatus, isClinicOpenNow } = require("./validation");
+const { getAvailability, parseStockCount, calculateStockMovement, isAllowedClinicStatus, isClinicOpenNow, normalizeStaffStatus, isApprovedStaffStatus } = require("./validation");
 const { hashPassword, verifyPassword, createResetToken, hashResetToken, isValidPassword } = require("./password");
 const { defaultMedications, createClinicInventory, setClinicMedicationStock } = require("./medication-catalog");
 const { getPasswordResetEmailConfig, sendPasswordResetEmail, sendStaffInvitationEmail } = require("./password-reset-email");
@@ -1047,7 +1047,7 @@ async function handleRequest(request, response) {
 			const email = String(body.email || "").trim().toLowerCase();
 			if (!isValidEmail(email)) return send(response, 400, { error: "Enter a valid email address." });
 			const responseMessage = "If this address is associated with an active account and email delivery is available, password reset instructions can be sent. If none arrive, contact an administrator.";
-			if (process.env.NODE_ENV === "production" && !getPasswordResetEmailConfig()) {
+			if (!getPasswordResetEmailConfig()) {
 				return send(response, 503, { error: "Password recovery is temporarily unavailable. Contact an administrator." });
 			}
 			const account = await pool.query(
@@ -1063,18 +1063,16 @@ async function handleRequest(request, response) {
 					 ON CONFLICT (email) DO UPDATE SET token_hash = EXCLUDED.token_hash, expires_at = EXCLUDED.expires_at, created_at = NOW()`,
 					[email, tokenHash, new Date(Date.now() + 30 * 60 * 1000).toISOString()],
 				);
-				if (process.env.NODE_ENV === "production") {
-					try {
-						await sendPasswordResetEmail({ email, token: resetToken, role: account.rows[0].role });
-					} catch (error) {
-						await pool.query("DELETE FROM password_reset_tokens WHERE email = $1 AND token_hash = $2", [email, tokenHash]);
-						console.error("Password reset email delivery failed.");
-						return send(response, 503, { error: "Password recovery is temporarily unavailable. Please try again later or contact an administrator." });
-					}
+				try {
+					await sendPasswordResetEmail({ email, token: resetToken, role: account.rows[0].role });
+				} catch (error) {
+					await pool.query("DELETE FROM password_reset_tokens WHERE email = $1 AND token_hash = $2", [email, tokenHash]);
+					console.error("Password reset email delivery failed.");
+					return send(response, 503, { error: "Password recovery is temporarily unavailable. Please try again later or contact an administrator." });
 				}
 			}
 			const responseBody = { message: responseMessage };
-			if (resetToken && process.env.NODE_ENV !== "production") responseBody.resetToken = resetToken;
+			if (resetToken && !getPasswordResetEmailConfig()) responseBody.resetToken = resetToken;
 			return send(response, 200, responseBody);
 		}
 
@@ -1120,12 +1118,13 @@ async function handleRequest(request, response) {
 		if (request.method === "POST" && request.url === "/api/staff") {
 			const body = await readBody(request);
 			const clinic = await pool.query("SELECT id FROM clinics WHERE name = $1", [body.clinic]);
-			const invitation = body.status === "approved";
 			const role = body.role === "admin" ? "admin" : "staff";
+			const requestedStatus = normalizeStaffStatus(body.status);
+			const invitation = requestedStatus === "approved";
 			const temporaryPassword = String(body.password || "");
 			if (!body.name || !clinic.rows[0] || !isValidPassword(temporaryPassword)) return send(response, 400, { error: "Name, a valid clinic, and a password of at least 6 characters are required." });
 			const invitationEmailConfigured = Boolean(getPasswordResetEmailConfig());
-			if (invitation && process.env.NODE_ENV === "production" && !invitationEmailConfigured) return send(response, 503, { error: "Staff invitation email is not configured." });
+			if (invitation && !invitationEmailConfigured) return send(response, 503, { error: "Staff invitation email is not configured." });
 			const email = String(body.email).trim().toLowerCase();
 			if (!isValidEmail(email)) return send(response, 400, { error: "Enter a valid email address." });
 			const duplicate = await pool.query("SELECT 1 FROM staff WHERE email = $1", [email]);
@@ -1134,7 +1133,7 @@ async function handleRequest(request, response) {
 				`INSERT INTO staff (name, email, password_hash, role, clinic_id, status)
 				 VALUES ($1, $2, $3, $4, $5, $6)
 				 RETURNING id`,
-				[body.name, email, hashPassword(temporaryPassword), role, clinic.rows[0].id, invitation ? "approved" : "pending"],
+				[body.name, email, hashPassword(temporaryPassword), role, clinic.rows[0].id, requestedStatus],
 			);
 			if (invitation) {
 				const resetToken = createResetToken();
