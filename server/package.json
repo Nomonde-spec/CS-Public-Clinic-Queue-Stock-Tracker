@@ -12,6 +12,7 @@
   "keywords": [],
   "type": "commonjs",
   "dependencies": {
+    "nodemailer": "^10.0.16",
     "pg": "^8.23.0",
     "resend": "^6.0.0"
   }

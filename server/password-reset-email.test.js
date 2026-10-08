@@ -8,6 +8,16 @@ const emailEnv = {
 	PUBLIC_APP_URL: "https://carequeue.example.test",
 };
 
+const smtpEnv = {
+	SMTP_HOST: "smtp.gmail.com",
+	SMTP_PORT: "465",
+	SMTP_SECURE: "true",
+	SMTP_USER: "sender@gmail.com",
+	SMTP_PASSWORD: "secret-password",
+	SMTP_FROM: "CareQueue <sender@gmail.com>",
+	PUBLIC_APP_URL: "https://carequeue.example.test",
+};
+
 test("Resend config requires an API key, sender, and public app URL", () => {
 	assert.equal(getPasswordResetEmailConfig({}), null);
 	assert.equal(getPasswordResetEmailConfig({ ...emailEnv, RESEND_API_KEY: " " }), null);
@@ -19,6 +29,47 @@ test("Resend config requires an API key, sender, and public app URL", () => {
 		publicAppUrl: emailEnv.PUBLIC_APP_URL,
 	});
 	assert.equal(getPasswordResetEmailConfig({ ...emailEnv, PUBLIC_APP_URL: "", CLIENT_ORIGIN: "https://client.example.test" }).publicAppUrl, "https://client.example.test");
+});
+
+test("SMTP config is accepted when no Resend API key is configured", () => {
+	assert.deepEqual(getPasswordResetEmailConfig(smtpEnv), {
+		host: smtpEnv.SMTP_HOST,
+		port: 465,
+		secure: true,
+		user: smtpEnv.SMTP_USER,
+		pass: smtpEnv.SMTP_PASSWORD,
+		from: smtpEnv.SMTP_FROM,
+		publicAppUrl: smtpEnv.PUBLIC_APP_URL,
+	});
+});
+
+test("password reset email can be delivered via SMTP transport", async () => {
+	let sentMessage;
+	const result = await sendPasswordResetEmail({
+		email: "staff@example.test",
+		token: "smtp-token",
+		role: "staff",
+		env: smtpEnv,
+		createTransport(config) {
+			assert.deepEqual(config, {
+				host: smtpEnv.SMTP_HOST,
+				port: 465,
+				secure: true,
+				auth: { user: smtpEnv.SMTP_USER, pass: smtpEnv.SMTP_PASSWORD },
+			});
+			return {
+				async sendMail(message) {
+					sentMessage = message;
+					return { response: "250 OK" };
+				},
+			};
+		},
+	});
+	assert.equal(sentMessage.from, smtpEnv.SMTP_FROM);
+	assert.equal(sentMessage.to, "staff@example.test");
+	assert.equal(sentMessage.subject, "Reset your CareQueue password");
+	assert.match(sentMessage.text, /resetToken=smtp-token/);
+	assert.deepEqual(result, { response: "250 OK" });
 });
 
 test("password reset URL keeps its token in the fragment", () => {
