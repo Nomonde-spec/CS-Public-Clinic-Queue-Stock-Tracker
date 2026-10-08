@@ -86,7 +86,39 @@ test("staff invitation includes temporary password and setup link", async () => 
 	assert.match(sentMessage.text, /resetToken=invite-token/);
 });
 
-test("staff invitation sends a setup link without a temporary password", async () => {
+test("SMTP authentication failures retain safe diagnostics", async () => {
+	await assert.rejects(
+		sendStaffInvitationEmail({
+			email: "new.staff@example.test",
+			name: "New Staff",
+			clinic: "Metro Family Care Centre",
+			temporaryPassword: "temporary-password",
+			token: "one-time-token",
+			env: emailEnv,
+			createTransport() {
+				return { async sendMail() { throw Object.assign(new Error("private SMTP detail"), { code: "EAUTH", responseCode: 535 }); } };
+			},
+		}),
+		(error) => error.code === "EAUTH" && error.responseCode === 535 && !error.message.includes("private SMTP detail"),
+	);
+});
+
+test("SMTP network errors retain a safe diagnostic code", async () => {
+	await assert.rejects(
+		sendPasswordResetEmail({
+			email: "staff@example.test",
+			token: "one-time-token",
+			role: "staff",
+			env: emailEnv,
+			createTransport() {
+				return { async sendMail() { throw Object.assign(new Error("private network detail"), { code: "ETIMEDOUT" }); } };
+			},
+		}),
+		(error) => error.code === "ETIMEDOUT" && !error.message.includes("private network detail"),
+	);
+});
+
+test("staff invitation email still sends a setup link when no temporary password is available", async () => {
 	let sentMessage;
 	await sendStaffInvitationEmail({
 		email: "approved.staff@example.test",
@@ -101,36 +133,4 @@ test("staff invitation sends a setup link without a temporary password", async (
 	assert.equal(sentMessage.to, "approved.staff@example.test");
 	assert.match(sentMessage.text, /Use the secure setup link below/);
 	assert.match(sentMessage.text, /resetToken=approved-token/);
-});
-
-test("SMTP authentication errors retain safe diagnostics", async () => {
-	await assert.rejects(
-		sendStaffInvitationEmail({
-			email: "new.staff@example.test",
-			name: "New Staff",
-			clinic: "Metro Family Care Centre",
-			temporaryPassword: "temporary-password",
-			token: "token",
-			env: emailEnv,
-			createTransport() {
-				return { async sendMail() { throw Object.assign(new Error("private detail"), { code: "EAUTH", responseCode: 535 }); } };
-			},
-		}),
-		(error) => error.code === "EAUTH" && error.responseCode === 535 && !error.message.includes("private detail"),
-	);
-});
-
-test("SMTP network errors retain safe diagnostics", async () => {
-	await assert.rejects(
-		sendPasswordResetEmail({
-			email: "staff@example.test",
-			token: "token",
-			role: "staff",
-			env: emailEnv,
-			createTransport() {
-				return { async sendMail() { throw Object.assign(new Error("private detail"), { code: "ETIMEDOUT" }); } };
-			},
-		}),
-		(error) => error.code === "ETIMEDOUT" && !error.message.includes("private detail"),
-	);
 });
