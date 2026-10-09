@@ -2553,11 +2553,13 @@ function AdminDashboard({
   medicationData,
   systemSummary,
   totalStaff,
+  totalAdmins,
 }: {
   clinicData: Clinic[];
   medicationData: Medication[];
   systemSummary: SystemSummary;
   totalStaff: number;
+  totalAdmins: number;
 }) {
   const [reportMessage, setReportMessage] = useState("");
   const critical = medicationData.filter(
@@ -2638,9 +2640,9 @@ function AdminDashboard({
           <span>2 regional nodes offline</span>
         </div>
         <div>
-          <small>TOTAL REGISTERED STAFF</small>
+          <small>APPROVED ACCOUNTS</small>
           <strong>{totalStaff} Staff</strong>
-          <span>Approved clinical personnel</span>
+          <span>{totalAdmins} Administrators</span>
         </div>
         <div>
           <small>SEVERE STOCK ALERTS</small>
@@ -3923,6 +3925,7 @@ export default function Home() {
             medicationData={medicationData}
             systemSummary={systemSummary}
             totalStaff={approvedStaff.filter((staff) => staff.role === "staff").length}
+            totalAdmins={approvedStaff.filter((staff) => staff.role === "admin").length}
           />
         )}
         {view === "adminClinics" && <AdminClinics clinicData={clinicData} onCreateClinic={createClinic} onUpdateClinic={updateClinicAdmin} onDeleteClinic={deleteClinic} />}
