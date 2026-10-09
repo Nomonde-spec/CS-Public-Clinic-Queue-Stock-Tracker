@@ -69,6 +69,12 @@ td strong { color: var(--ink); }
 .filter-row label { display: flex; align-items: center; gap: 7px; flex: 1; padding: 0 8px; color: var(--teal); }
 .filter-row input { width: 100%; border: 0; outline: 0; font-size: 11px; }
 select { min-width: 160px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 5px; color: var(--muted); background: white; font-size: 11px; }
+.admin-restock-row { display: grid; grid-template-columns: minmax(150px, 1fr) minmax(220px, 1.6fr) minmax(140px, .75fr) minmax(180px, auto); align-items: end; }
+.admin-restock-row label { display: grid; grid-template-rows: auto 40px; min-width: 0; gap: 6px; padding: 0 4px; }
+.admin-restock-row label select, .admin-restock-row label input[type="number"] { width: 100%; min-width: 0; min-height: 40px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 5px; color: var(--ink); background: white; font-size: 14px; }
+.admin-restock-row .primary-button { min-height: 40px; white-space: nowrap; }
+@media (max-width: 850px) { .admin-restock-row { grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr); }.admin-restock-row .primary-button { width: 100%; } }
+@media (max-width: 560px) { .admin-restock-row { grid-template-columns: minmax(0, 1fr); } }
 .directory-layout { display: grid; grid-template-columns: .9fr 1.4fr; gap: 20px; }
 .directory-list { display: grid; gap: 10px; align-content: start; }
 .directory-card { display: flex; justify-content: space-between; gap: 15px; }

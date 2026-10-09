@@ -1,6 +1,8 @@
 ﻿"use client";
 
-import { FormEvent, useCallback, useEffect, useState } from "react";
+import { FormEvent, startTransition, useCallback, useEffect, useState } from "react";
+import autoTable from "jspdf-autotable";
+import { jsPDF } from "jspdf";
 import { dedupeStaffList } from "../lib/staff";
 
 type View =
@@ -18,6 +20,55 @@ type View =
   | "adminStaff"
   | "adminMedications";
 type Role = "public" | "staff" | "admin";
+type StoredAuthSession = {
+  role: "staff" | "admin";
+  name: string;
+  email: string;
+  clinic: string;
+};
+
+const authSessionStorageKey = "carequeue-auth-session";
+
+function readStoredAuthSession(): StoredAuthSession | null {
+  try {
+    const stored = window.sessionStorage.getItem(authSessionStorageKey);
+    if (!stored) return null;
+    const session = JSON.parse(stored) as Partial<StoredAuthSession>;
+    if (
+      (session.role !== "staff" && session.role !== "admin") ||
+      typeof session.name !== "string" ||
+      typeof session.email !== "string" ||
+      typeof session.clinic !== "string" ||
+      (session.role === "staff" && (!session.name.trim() || !session.clinic.trim()))
+    ) {
+      window.sessionStorage.removeItem(authSessionStorageKey);
+      return null;
+    }
+    return {
+      role: session.role,
+      name: session.name,
+      email: session.email,
+      clinic: session.clinic,
+    };
+  } catch {
+    try {
+      window.sessionStorage.removeItem(authSessionStorageKey);
+    } catch {}
+    return null;
+  }
+}
+
+function writeStoredAuthSession(session: StoredAuthSession) {
+  try {
+    window.sessionStorage.setItem(authSessionStorageKey, JSON.stringify(session));
+  } catch {}
+}
+
+function clearStoredAuthSession() {
+  try {
+    window.sessionStorage.removeItem(authSessionStorageKey);
+  } catch {}
+}
 
 type Clinic = {
   name: string;
@@ -2499,9 +2550,56 @@ function AdminDashboard({
   medicationData: Medication[];
   systemSummary: SystemSummary;
 }) {
+  const [reportMessage, setReportMessage] = useState("");
   const critical = medicationData.filter(
     (item) => item.availability !== "In Stock",
   );
+  const generateInventoryReport = () => {
+    if (!medicationData.length) {
+      setReportMessage("No medication inventory is available to report.");
+      return;
+    }
+
+    const generatedAt = new Date();
+    const report = new jsPDF({ orientation: "landscape", format: "a4" });
+    autoTable(report, {
+      head: [["Medication", "Category", "Stock count", "Availability", "Reporting clinics", "Updated at"]],
+      body: medicationData.map((item) => [
+        item.name,
+        item.category,
+        item.stockCount,
+        item.availability,
+        item.clinicName || item.clinics || "Not reported",
+        item.updatedAt || "Not reported",
+      ]),
+      startY: 30,
+      margin: { top: 30, right: 10, bottom: 16, left: 10 },
+      styles: { fontSize: 8, cellPadding: 2, overflow: "linebreak" },
+      headStyles: { fillColor: [0, 145, 135] },
+      willDrawPage: () => {
+        report.setFontSize(15);
+        report.setTextColor(30, 50, 70);
+        report.text("CareQueue Public Medication Inventory", 10, 15);
+        report.setFontSize(9);
+        report.setTextColor(90, 100, 110);
+        report.text(`Generated ${generatedAt.toLocaleString()}`, 10, 22);
+      },
+      didDrawPage: () => {
+        report.setFontSize(8);
+        report.setTextColor(90, 100, 110);
+        report.text(
+          `Page ${report.internal.pages.length - 1}`,
+          report.internal.pageSize.getWidth() - 10,
+          report.internal.pageSize.getHeight() - 7,
+          { align: "right" },
+        );
+      },
+    });
+    report.save(
+      `carequeue-public-inventory-${generatedAt.toISOString().slice(0, 10)}.pdf`,
+    );
+    setReportMessage("Public inventory report downloaded.");
+  };
   return (
     <main className="admin-page">
       <div className="admin-page-title">
@@ -2513,9 +2611,16 @@ function AdminDashboard({
             clinics.
           </p>
         </div>
-        <button className="primary-button">
-          Generate public inventory report
-        </button>
+        <div>
+          <button
+            className="primary-button"
+            type="button"
+            onClick={generateInventoryReport}
+          >
+            Generate public inventory report
+          </button>
+          {reportMessage && <p role="status">{reportMessage}</p>}
+        </div>
       </div>
       <div className="admin-stats">
         <div>
@@ -2563,7 +2668,7 @@ function AdminDashboard({
             </div>
           </div>
           {clinicData
-            .filter((clinic) => clinic.status === "Open")
+            .filter((clinic) => clinic.status !== "Closed")
             .map((clinic) => (
               <div className="admin-clinic-row" key={clinic.name}>
                 <strong>{clinic.name}</strong>
@@ -2573,9 +2678,9 @@ function AdminDashboard({
                 </span>
                 <StatusPill
                   value={
-                    clinic.wait !== null && clinic.wait < 20
-                      ? "Low Wait"
-                      : "Moderate Wait"
+                    clinic.status.startsWith("Open - ")
+                      ? clinic.status.slice("Open - ".length)
+                      : clinic.status
                   }
                 />
               </div>
@@ -2854,7 +2959,8 @@ function AdminMedications({
   const createMedication = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     setCreateError("");
-    const values = new FormData(event.currentTarget);
+    const form = event.currentTarget;
+    const values = new FormData(form);
     try {
       await onCreateMedication({
         name: String(values.get("name") || "").trim(),
@@ -2862,7 +2968,7 @@ function AdminMedications({
         clinics: "All clinics",
         stockCount: Number(values.get("stockCount")),
       });
-      event.currentTarget.reset();
+      form.reset();
       setAlertFilter("All Stock Levels");
       setShowCreateForm(false);
     } catch (error) {
@@ -2950,7 +3056,7 @@ function AdminMedications({
       )}
       <section className="portal-panel medication-restock-panel">
         <h2>Restock clinic inventory</h2>
-        <div className="filter-row">
+        <div className="filter-row admin-restock-row">
           <label>
             Clinic
             <select
@@ -3402,6 +3508,18 @@ export default function Home() {
   });
   const [authMessage, setAuthMessage] = useState("");
   useEffect(() => {
+    const resetParams = new URLSearchParams(window.location.hash.slice(1));
+    if (!resetParams.has("resetEmail") || !resetParams.has("resetToken")) {
+      const session = readStoredAuthSession();
+      if (session) {
+        startTransition(() => {
+          setRole(session.role);
+          if (session.name) setStaffName(session.name);
+          if (session.clinic) setEnrolledClinic(session.clinic);
+          setView(session.role === "admin" ? "adminDashboard" : "staffOverview");
+        });
+      }
+    }
     if (!window.history.state?.careQueueView) {
       window.history.replaceState(
         { ...window.history.state, careQueueView: "home" },
@@ -3712,6 +3830,7 @@ export default function Home() {
         error?: string;
         role?: Role;
         name?: string;
+        email?: string;
         clinic?: string;
       };
       if (response.status === 428 && result.code === "ADMIN_TOKEN_REQUIRED") {
@@ -3720,7 +3839,15 @@ export default function Home() {
       if (!response.ok) {
         throw new Error(result.error || "Invalid credentials");
       }
-      if (!result.role) throw new Error("Login response did not include an account role.");
+      if (result.role !== "admin" && result.role !== "staff") {
+        throw new Error("Login response did not include a valid account role.");
+      }
+      writeStoredAuthSession({
+        role: result.role,
+        name: result.name || "",
+        email: result.email || email,
+        clinic: result.clinic || "",
+      });
       setRole(result.role);
       if (result.name) setStaffName(result.name);
       if (result.clinic) setEnrolledClinic(result.clinic);
@@ -3761,6 +3888,7 @@ export default function Home() {
     }));
   };
   const logout = () => {
+    clearStoredAuthSession();
     setRole("public");
     setView("home");
   };
