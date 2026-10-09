@@ -401,10 +401,14 @@ function AdminHeader({
   view,
   onNavigate,
   onLogout,
+  userName,
+  userEmail,
 }: {
   view: View;
   onNavigate: (view: View) => void;
   onLogout: () => void;
+  userName: string;
+  userEmail: string;
 }) {
   return (
     <header className="admin-header">
@@ -436,8 +440,8 @@ function AdminHeader({
         </button>
       </nav>
       <div className="admin-account">
-        <strong>sys.admin@carequeue.gov</strong>
-        <small>Administrator</small>
+        <strong>{userName || userEmail}</strong>
+        <small>{userEmail} · Administrator</small>
       </div>
       <button className="sign-out" onClick={onLogout}>
         Sign out
@@ -451,12 +455,14 @@ function StaffHeader({
   onNavigate,
   onLogout,
   staffName,
+  staffEmail,
   enrolledClinic,
 }: {
   view: View;
   onNavigate: (view: View) => void;
   onLogout: () => void;
   staffName: string;
+  staffEmail: string;
   enrolledClinic: string;
 }) {
   return (
@@ -484,6 +490,7 @@ function StaffHeader({
       </nav>
       <div className="admin-account">
         <strong>{staffName}</strong>
+        <small>{staffEmail}</small>
         <small>{enrolledClinic}</small>
       </div>
       <button className="sign-out" onClick={onLogout}>
@@ -3491,6 +3498,7 @@ export default function Home() {
   const [selectedClinic, setSelectedClinic] = useState<Clinic | null>(null);
   const [role, setRole] = useState<Role>("public");
   const [staffName, setStaffName] = useState("Staff member");
+  const [userEmail, setUserEmail] = useState("");
   const [enrolledClinic, setEnrolledClinic] = useState(
     "Metro Family Care Centre",
   );
@@ -3515,6 +3523,7 @@ export default function Home() {
         startTransition(() => {
           setRole(session.role);
           if (session.name) setStaffName(session.name);
+          if (session.email) setUserEmail(session.email);
           if (session.clinic) setEnrolledClinic(session.clinic);
           setView(session.role === "admin" ? "adminDashboard" : "staffOverview");
         });
@@ -3844,12 +3853,13 @@ export default function Home() {
       }
       writeStoredAuthSession({
         role: result.role,
-        name: result.name || "",
+        name: result.name || email,
         email: result.email || email,
         clinic: result.clinic || "",
       });
       setRole(result.role);
-      if (result.name) setStaffName(result.name);
+      setStaffName(result.name || email);
+      setUserEmail(result.email || email);
       if (result.clinic) setEnrolledClinic(result.clinic);
       setView(result.role === "admin" ? "adminDashboard" : "staffOverview");
       setAuthMessage("");
@@ -3890,12 +3900,21 @@ export default function Home() {
   const logout = () => {
     clearStoredAuthSession();
     setRole("public");
+    setStaffName("Staff member");
+    setUserEmail("");
+    setEnrolledClinic("Metro Family Care Centre");
     setView("home");
   };
   if (role === "admin" && view !== "login" && view !== "home")
     return (
       <>
-        <AdminHeader view={view} onNavigate={setView} onLogout={logout} />
+        <AdminHeader
+          view={view}
+          onNavigate={setView}
+          onLogout={logout}
+          userName={staffName}
+          userEmail={userEmail}
+        />
         {view === "adminDashboard" && (
           <AdminDashboard
             clinicData={clinicData}
@@ -3935,6 +3954,7 @@ export default function Home() {
           onNavigate={setView}
           onLogout={logout}
           staffName={staffName}
+          staffEmail={userEmail}
           enrolledClinic={enrolledClinic}
         />
         {view === "staffQueue" && (

@@ -1100,7 +1100,7 @@ async function handleRequest(request, response) {
 			const adminAccount = await pool.query("SELECT 1 FROM staff WHERE email = $1 AND role = 'admin' AND status = 'approved'", [email]);
 			const isAdminLogin = body.role === "admin" || email === process.env.ADMIN_EMAIL?.trim().toLowerCase() || adminAccount.rows[0];
 			if (isAdminLogin) {
-				const admin = await pool.query("SELECT password_hash FROM staff WHERE email = $1 AND role = 'admin' AND status = 'approved'", [email]);
+				const admin = await pool.query("SELECT name, email, password_hash FROM staff WHERE email = $1 AND role = 'admin' AND status = 'approved'", [email]);
 				const loginStage = getAdminLoginStage({
 					passwordValid: Boolean(admin.rows[0] && verifyPassword(body.password, admin.rows[0].password_hash)),
 					token: String(body.token || "").trim(),
@@ -1110,7 +1110,7 @@ async function handleRequest(request, response) {
 					return send(response, 428, { code: "ADMIN_TOKEN_REQUIRED", error: "Enter the administrator security token." });
 				}
 				return loginStage === "authenticated"
-					? send(response, 200, { role: "admin", email })
+					? send(response, 200, { role: "admin", name: admin.rows[0].name || email, email: admin.rows[0].email || email, clinic: "All clinics" })
 					: send(response, 401, { error: "Invalid administrator credentials." });
 			}
 			const credentials = await pool.query("SELECT password_hash FROM staff WHERE email = $1 AND role = 'staff' AND status = 'approved'", [email]);
