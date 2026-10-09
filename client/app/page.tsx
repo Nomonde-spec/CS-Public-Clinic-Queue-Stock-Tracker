@@ -1861,10 +1861,26 @@ function MedicationCollectionTickets({
     };
   }, [clinicName]);
 
+  const hasInvalidMedicationSelection = Object.entries(selectedMedications).some(
+    ([name, quantity]) => {
+      const medication = medicationData.find((item) => item.name === name);
+      return (
+        !medication ||
+        !Number.isInteger(quantity) ||
+        quantity < 1 ||
+        quantity > medication.stockCount
+      );
+    },
+  );
+
   const updateTicket = async (
     ticket: QueueTicket,
     action: "call" | "serve" | "miss",
   ) => {
+    if (action === "serve" && hasInvalidMedicationSelection) {
+      setMessage("Selected medication quantities must be within available stock.");
+      return;
+    }
     setActionId(ticket.id);
     setMessage("");
     try {
@@ -1933,6 +1949,7 @@ function MedicationCollectionTickets({
               <input
                 type="checkbox"
                 checked={quantity !== undefined}
+                disabled={medication.stockCount <= 0 && quantity === undefined}
                 onChange={(event) =>
                   setSelectedMedications((current) => {
                     const next = { ...current };
@@ -1961,6 +1978,11 @@ function MedicationCollectionTickets({
             </label>
           );
         })}
+        {hasInvalidMedicationSelection && (
+          <p className="queue-error" role="alert">
+            Uncheck unavailable medications or enter a whole quantity within current stock.
+          </p>
+        )}
       </div>
       {loading ? (
         <p className="empty">Loading clinic queue...</p>
@@ -2000,7 +2022,7 @@ function MedicationCollectionTickets({
                 {(ticket.status === "ready" || ticket.status === "called") && (
                   <button
                     className="primary-button"
-                    disabled={actionId === ticket.id}
+                    disabled={actionId === ticket.id || hasInvalidMedicationSelection}
                     onClick={() => updateTicket(ticket, "serve")}
                   >
                     {actionId === ticket.id ? "Updating..." : "Serve"}
