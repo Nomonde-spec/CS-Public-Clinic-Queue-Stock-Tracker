@@ -73,6 +73,17 @@ test('clinic status is closed outside configured operating hours', () => {
   assert.equal(isClinicOpenNow('Mon - Fri: 08:00 - 17:00', new Date('2026-10-10T10:00:00.000Z'), 'UTC'), false);
 });
 
+test('Metro Family Care Centre stays open at all hours every day', () => {
+  for (const instant of [
+    '2026-10-07T02:00:00.000Z',
+    '2026-10-07T14:00:00.000Z',
+    '2026-10-10T23:59:00.000Z',
+    '2026-10-11T06:00:00.000Z',
+  ]) {
+    assert.equal(isClinicOpenNow('Open 24 Hours', new Date(instant), 'UTC'), true);
+  }
+});
+
 test('queue numbers and waits are isolated by clinic', () => {
   const now = new Date('2026-09-19T08:00:00.000Z');
   const first = allocateTicket([], 'Clinic A', now);

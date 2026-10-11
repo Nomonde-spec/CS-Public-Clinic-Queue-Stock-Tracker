@@ -10,7 +10,7 @@ const { getAllowedOrigins, validateProductionConfig } = require("./runtime-confi
 
 const port = Number(process.env.PORT) || 3000;
 const defaultClinics = [
-	{ id: 1, name: "Metro Family Care Centre", province: "Gauteng", district: "Central District", address: "220 Plaza Avenue", hours: "08:00 - 17:00", phone: "011 555 0101", wait: 12, patients: 4, stock: 98, status: "Open", updatedAt: new Date().toISOString() },
+	{ id: 1, name: "Metro Family Care Centre", province: "Gauteng", district: "Central District", address: "220 Plaza Avenue", hours: "Open 24 Hours", phone: "011 555 0101", wait: 12, patients: 4, stock: 98, status: "Open", updatedAt: new Date().toISOString() },
 	{ id: 2, name: "Northside Public Health Clinic", province: "KwaZulu-Natal", district: "Sector 12", address: "12 Northside Road", hours: "08:00 - 17:00", phone: "011 555 0102", wait: 35, patients: 14, stock: 84, status: "Open", updatedAt: new Date().toISOString() },
 	{ id: 3, name: "Eastside Community Dispensary", province: "Eastern Cape", district: "East Area", address: "45 East Market Street", hours: "08:00 - 17:00", phone: "011 555 0103", wait: 55, patients: 25, stock: 90, status: "Open", updatedAt: new Date().toISOString() },
 	{ id: 4, name: "Lakeside Community Clinic", province: "Western Cape", district: "Lakeside District", address: "8 Lakeside Drive", hours: "08:00 - 17:00", phone: "011 555 0104", wait: null, patients: 0, stock: 55, status: "Closed", updatedAt: new Date().toISOString() },
@@ -708,6 +708,7 @@ async function ensureDatabase() {
 	for (const clinic of defaultClinics) {
 		await pool.query("UPDATE clinics SET province = $1 WHERE name = $2", [clinic.province, clinic.name]);
 	}
+	await pool.query("UPDATE clinics SET hours = $1 WHERE name = $2", ["Open 24 Hours", "Metro Family Care Centre"]);
 
 	const adminEmail = process.env.ADMIN_EMAIL?.trim().toLowerCase();
 	if (adminEmail && process.env.ADMIN_PASSWORD) {

@@ -161,7 +161,7 @@ let clinics: Clinic[] = [
     province: "Gauteng",
     district: "Central District",
     address: "220 Plaza Avenue, Central District",
-    hours: "Mon - Fri: 8:00 AM - 6:00 PM",
+    hours: "Open 24 Hours",
     phone: "+1 (555) 019-2834",
     wait: 12,
     patients: 4,
